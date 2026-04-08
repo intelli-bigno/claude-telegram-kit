@@ -152,8 +152,14 @@ Our patch does three things:
 
 2. `startTyping(chat_id)` starts a `setInterval` that fires every 4.5s
    (just under Telegram's 5s expiry) until explicitly stopped. It also
-   arms a 5-minute hard cap via `setTimeout` so runaway intervals can't
-   pile up if something crashes mid-reply.
+   arms a 30-minute hard cap via `setTimeout` so runaway intervals can't
+   pile up if something crashes mid-reply. We originally set this to
+   5 minutes and learned the hard way: Claude legitimately thinks for
+   10+ minutes on complex multi-tool workflows (large codegen, contract
+   drafting, deep research), and cutting the indicator mid-work is
+   exactly the symptom the patch was supposed to fix. 30 min is well
+   past any realistic single turn but still bounds genuinely runaway
+   loops.
 
 3. `stopTyping(chat_id)` is called from the `reply` tool handler. As soon
    as Claude sends a reply chunk, the indicator can stop — the user is

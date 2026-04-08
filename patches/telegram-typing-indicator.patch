@@ -21,16 +21,14 @@
  
    // Ack reaction — lets the user know we're processing. Fire-and-forget.
    // Telegram only accepts a fixed emoji whitelist — if the user configures
-@@ -945,7 +949,33 @@
-   }).catch(err => {
-     process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
+@@ -947,6 +951,35 @@
    })
-+}
-+
+ }
+ 
 +// === LOCAL PATCH: persistent typing indicator =================================
 +// Telegram's sendChatAction('typing') only lasts ~5 seconds. Claude Code may
 +// take much longer to respond, leaving the user without any "processing"
-+// signal. Refresh every 4.5s until reply is sent (or 5min hard cap).
++// signal. Refresh every 4.5s until reply is sent (or 30min hard cap).
 +// Restore from server.ts.orig if upstream plugin updates clobber this.
 +const typingTimers = new Map<string, NodeJS.Timeout>()
 +const typingExpiry = new Map<string, NodeJS.Timeout>()
@@ -40,11 +38,14 @@
 +    void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
 +  }, 4500)
 +  typingTimers.set(chat_id, timer)
-+  // Hard cap: stop after 5 minutes regardless to avoid runaway intervals
-+  // if Claude never calls reply (crash, infinite loop, etc).
-+  const cap = setTimeout(() => stopTyping(chat_id), 5 * 60 * 1000)
++  // Hard cap: stop after 30 minutes regardless. Long thinks (complex
++  // multi-tool workflows, large file generation) legitimately run 10+
++  // minutes — a tighter cap cuts off the indicator mid-work. 30 min is
++  // well past any realistic Claude turn but still bounds runaway intervals
++  // if the process crashes and reply is never called.
++  const cap = setTimeout(() => stopTyping(chat_id), 30 * 60 * 1000)
 +  typingExpiry.set(chat_id, cap)
- }
++}
 +function stopTyping(chat_id: string): void {
 +  const t = typingTimers.get(chat_id)
 +  if (t) { clearInterval(t); typingTimers.delete(chat_id) }
@@ -52,6 +53,7 @@
 +  if (e) { clearTimeout(e); typingExpiry.delete(chat_id) }
 +}
 +// === END LOCAL PATCH ==========================================================
- 
++
  // Without this, any throw in a message handler stops polling permanently
  // (grammy's default error handler calls bot.stop() and rethrows).
+ bot.catch(err => {

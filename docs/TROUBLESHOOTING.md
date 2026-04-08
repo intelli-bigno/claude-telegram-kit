@@ -205,7 +205,8 @@ looks dead.
 
 **Fix.** Apply `patches/telegram-typing-indicator.patch`. It adds a
 4.5-second refresh loop that keeps the indicator alive until `reply` is
-called (with a 5-minute hard cap as a safety net).
+called (with a 30-minute hard cap as a safety net — we originally
+tried 5 minutes and it was too aggressive for long-running thinks).
 
 ```bash
 PLUGIN_DIR="$HOME/.claude/plugins/cache/claude-plugins-official/telegram/0.0.4"

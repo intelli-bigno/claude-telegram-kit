@@ -40,7 +40,7 @@ if upstream merges the fix).
 | MCP server starts but messages never reach Claude | Session launched without `--channels` flag → `Channel notifications skipped` | `clbg` always passes `--channels plugin:telegram@claude-plugins-official` |
 | Background session freezes on first Bash call | Permission prompt has no one to answer it in detached tmux | `--dangerously-skip-permissions` + strict `allowFrom` allowlist as the real defense |
 | Background session "continues" a totally unrelated conversation | `claude --continue` picks the most-recent jsonl in the cwd's session pool, and `$HOME` pools every session ever launched there | Dedicated cwd `~/.claude-bg/` isolates the bg session pool |
-| Telegram "typing…" disappears after 5 seconds even though Claude is still thinking | Upstream plugin calls `sendChatAction('typing')` exactly once per message | `patches/telegram-typing-indicator.patch` refreshes every 4.5s until `reply` is sent (5-min hard cap) |
+| Telegram "typing…" disappears after 5 seconds even though Claude is still thinking | Upstream plugin calls `sendChatAction('typing')` exactly once per message | `patches/telegram-typing-indicator.patch` refreshes every 4.5s until `reply` is sent (30-min hard cap) |
 | Two Claude sessions both polling the same bot — race conditions, missed replies | Telegram Bot API only allows one `getUpdates` client per token | `docs/MULTI-BOT.md`: use `TELEGRAM_STATE_DIR` + separate bot per session |
 | First launch from a new cwd re-prompts for folder trust | Claude Code stores trust per-directory | Documented; one attach to press Enter and you're done |
 
