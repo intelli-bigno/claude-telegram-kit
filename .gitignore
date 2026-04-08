@@ -1,0 +1,20 @@
+# Local state — MUST never be committed
+.env
+*.env
+access.json
+approved/
+channels/
+
+# Telegram tokens, chat IDs, etc.
+*.token
+*token*.txt
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Logs
+*.log
+mcp-logs/
