@@ -81,7 +81,7 @@ silent in a way that looks like something else is broken.
 │       "main": {
 │         "createdAt": "...",
 │         "botUsername": "@my_main_bot",
-│         "stateDir": "~/.claude/channels/telegram",
+│         "stateDir": "~/.claude/channels/telegram-main",
 │         "cwd": "~/.claude-bg/main",
 │         "tmuxSession": "claude-bg-main",
 │         "notes": "..."
@@ -98,7 +98,7 @@ silent in a way that looks like something else is broken.
 
 ```
 ~/.claude/channels/
-├── telegram/                               ← first container ("main" by convention)
+├── telegram-main/                          ← first container
 │   ├── .env                                ← TELEGRAM_BOT_TOKEN=... (0600)
 │   ├── access.json                         ← dmPolicy, allowFrom, ackReaction, etc.
 │   └── approved/                           ← pairing ACK dropzone

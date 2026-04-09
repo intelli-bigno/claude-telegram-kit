@@ -426,14 +426,16 @@ def _generate_wrapper(label: str) -> Path:
     c = get_container(label)
     cwd = Path(c["cwd"])
     state_dir = c["stateDir"]
-    run_sh = cwd / "run.sh"
+    bg_dir = BG_ROOT / label
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    run_sh = bg_dir / "run.sh"
 
     claude_bin = str(CLAUDE_BIN)
     channels_arg = PLUGIN_CHANNEL
     claude_json = str(CLAUDE_JSON)
     projects_root = str(PROJECTS_ROOT)
     encoded_cwd = str(cwd).replace("/", "-")
-    restart_log = str(cwd / "restart.log")
+    restart_log = str(bg_dir / "restart.log")
     env_path = str(Path(state_dir) / ".env")
     cwd_str = str(cwd)
 
@@ -444,7 +446,7 @@ def _generate_wrapper(label: str) -> Path:
         "# Auto-generated wrapper for clbg container '{label}'.\n"
         "# Do not edit — regenerated on every 'clbg start' / 'clbg resume'.\n"
         "\n"
-        "set -euo pipefail\n"
+        "set -eo pipefail\n"
         "\n"
         'CLAUDE_BIN="{claude_bin}"\n'
         'CHANNELS_ARG="{channels_arg}"\n'
@@ -466,7 +468,11 @@ def _generate_wrapper(label: str) -> Path:
         "cleanup() {{\n"
         '    echo "[$(date -Iseconds)] wrapper exiting (signal or exit), marking DISABLED" >> "$RESTART_LOG"\n'
         '    if [ -f "$ENV_PATH" ]; then\n'
-        """        sed -i.bak 's/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=DISABLED/' "$ENV_PATH"\n"""
+        "        python3 -c \"\n"
+        "import pathlib, re, sys\n"
+        "p = pathlib.Path(sys.argv[1])\n"
+        "p.write_text(re.sub(r'^TELEGRAM_BOT_TOKEN=.*', 'TELEGRAM_BOT_TOKEN=DISABLED', p.read_text(), flags=re.MULTILINE))\n"
+        '" "$ENV_PATH"\n'
         "    fi\n"
         "}}\n"
         "trap cleanup EXIT SIGTERM\n"
@@ -493,30 +499,16 @@ def _generate_wrapper(label: str) -> Path:
         '            SESSION_ARGS=("--resume" "$LAST_SESSION_ID")\n'
         '            echo "[$(date -Iseconds)] resuming session $LAST_SESSION_ID" >> "$RESTART_LOG"\n'
         "        else\n"
-        """            SESSION_ARGS=("--session-id" "$(uuidgen | tr '[:upper:]' '[:lower:]')")\n"""
+        """            SESSION_ARGS=("--session-id" "$(python3 -c 'import uuid; print(uuid.uuid4())')")\n"""
         '            echo "[$(date -Iseconds)] last session jsonl missing, starting new session" >> "$RESTART_LOG"\n'
         "        fi\n"
         "    else\n"
-        """        SESSION_ARGS=("--session-id" "$(uuidgen | tr '[:upper:]' '[:lower:]')")\n"""
+        """        SESSION_ARGS=("--session-id" "$(python3 -c 'import uuid; print(uuid.uuid4())')")\n"""
         '        echo "[$(date -Iseconds)] no prior session, starting new session" >> "$RESTART_LOG"\n'
         "    fi\n"
         "\n"
-        "    # --- crash-loop detection ---\n"
-        "    now=$(date +%s)\n"
-        "    elapsed=$(( now - last_start ))\n"
-        '    if [ "$elapsed" -ge "$STABLE_SECONDS" ]; then\n'
-        "        crash_count=0\n"
-        "    fi\n"
-        "    last_start=$now\n"
-        "\n"
-        "    crash_count=$(( crash_count + 1 ))\n"
-        '    if [ "$crash_count" -gt "$MAX_CRASHES" ]; then\n'
-        '        echo "[$(date -Iseconds)] crash loop detected ($crash_count crashes), cooling down ${{STABLE_SECONDS}}s" >> "$RESTART_LOG"\n'
-        "        sleep $STABLE_SECONDS\n"
-        "        crash_count=0\n"
-        "    fi\n"
-        "\n"
         "    # --- run claude ---\n"
+        "    last_start=$(date +%s)\n"
         "    set +e\n"
         '    "$CLAUDE_BIN" \\\n'
         '        --channels "$CHANNELS_ARG" \\\n'
@@ -526,6 +518,21 @@ def _generate_wrapper(label: str) -> Path:
         "    set -e\n"
         "\n"
         '    echo "[$(date -Iseconds)] claude exited with code $EXIT_CODE, restarting..." >> "$RESTART_LOG"\n'
+        "\n"
+        "    # --- crash-loop detection (after claude exits) ---\n"
+        "    now=$(date +%s)\n"
+        "    elapsed=$(( now - last_start ))\n"
+        '    if [ "$elapsed" -ge "$STABLE_SECONDS" ]; then\n'
+        "        crash_count=0\n"
+        "    fi\n"
+        "\n"
+        "    crash_count=$(( crash_count + 1 ))\n"
+        '    if [ "$crash_count" -gt "$MAX_CRASHES" ]; then\n'
+        '        echo "[$(date -Iseconds)] crash loop detected ($crash_count crashes), cooling down ${{STABLE_SECONDS}}s" >> "$RESTART_LOG"\n'
+        "        sleep $STABLE_SECONDS\n"
+        "        crash_count=0\n"
+        "    fi\n"
+        "\n"
         "    sleep 2\n"
         "done\n"
     ).format(
