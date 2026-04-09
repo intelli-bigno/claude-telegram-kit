@@ -63,6 +63,25 @@ shell access.
 
 ## Protecting the token
 
+### containers.json의 botToken 필드
+
+`clbg link`는 토큰을 `.env`뿐만 아니라 `~/.claude-bg/containers.json`의
+`botToken` 필드에도 저장한다. 이 필드는 `clbg start`/`clbg resume` 시
+`.env`에 실제 토큰을 기록하고, `clbg stop` 시 `DISABLED`로 교체하는
+토큰 격리 메커니즘의 핵심이다.
+
+`containers.json`은 모드 0600으로 생성되며, 토큰이 평문으로 저장된다.
+따라서 `.env`와 동일한 보안 수준으로 취급해야 한다:
+
+- **절대 git에 커밋하지 않는다** — `.gitignore`에 이미 포함되어 있지만
+  `~/.claude-bg/` 경로 자체가 프로젝트 외부에 있으므로 실수할 가능성은 낮다.
+- **다른 사용자에게 읽기 권한을 주지 않는다** — `ls -la ~/.claude-bg/containers.json`
+  으로 0600인지 확인한다.
+- **토큰 갱신 시 `clbg link`를 다시 실행한다** — `.env`와 `containers.json`
+  양쪽이 동시에 업데이트된다.
+
+### .env 파일
+
 `~/.claude/channels/telegram/.env` has mode 0600 by default (owner
 read/write only), created by the official plugin. Verify:
 

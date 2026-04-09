@@ -387,6 +387,47 @@ runs, so we don't have to sum event-by-event.
 
 ---
 
+## 토큰 격리 (Token Isolation)
+
+`settings.json`에서 telegram 플러그인이 활성화되어 있으면, 동일 머신에서
+여러 Claude Code 세션이 뜰 때 각 세션의 bun 프로세스가 같은 봇 토큰으로
+Telegram long-polling을 시도한다. Telegram Bot API는 토큰당 하나의
+`getUpdates` 소비자만 허용하므로, 두 번째 소비자는 `409 Conflict`를 받고
+메시지가 무작위로 분배되거나 드롭된다.
+
+### 해결 방식
+
+`clbg`는 **start/stop 시점에 .env 파일의 토큰을 교체**하는 방식으로 격리한다.
+
+1. **`clbg link`** — 토큰을 `.env`에 쓰는 것과 동시에 `containers.json`의
+   `botToken` 필드에도 저장한다. 이 필드가 토큰의 단일 진실 공급원(source of
+   truth)이 된다.
+
+2. **`clbg start` / `clbg resume`** — tmux 세션 생성 직전에
+   `activate_token(label)`을 호출하여 `containers.json`에서 토큰을 읽어
+   `.env`에 기록한다. 이 시점부터 bun이 실제 토큰으로 polling을 시작한다.
+
+3. **`clbg stop` / `clbg restart`** — tmux 세션 종료 직후
+   `deactivate_token(label)`을 호출하여 `.env`를
+   `TELEGRAM_BOT_TOKEN=DISABLED`로 교체한다. 다른 세션의 bun이 같은 토큰으로
+   polling하는 것을 방지한다.
+
+4. **초기 상태** — `scaffold_state_dir()`이 `.env`를
+   `TELEGRAM_BOT_TOKEN=DISABLED`로 생성한다. `clbg link` 전까지는 어떤
+   세션도 polling하지 않는다.
+
+### 흐름도
+
+```
+clbg new   → .env = DISABLED (초기 상태)
+clbg link  → .env = <실제 토큰>, containers.json에 botToken 저장
+clbg start → activate_token() → .env = <실제 토큰> → tmux 세션 시작
+clbg stop  → tmux 세션 종료 → deactivate_token() → .env = DISABLED
+clbg restart → stop(deactivate) → resume(activate) → 토큰 교체 완료
+```
+
+---
+
 ## Why not Telegram topics?
 
 We investigated. The official plugin's source has zero references to

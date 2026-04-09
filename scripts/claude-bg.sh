@@ -219,9 +219,7 @@ INITIAL_ACCESS_JSON = {
     "ackReaction": "👀",
 }
 
-INITIAL_ENV_TEMPLATE = """# Paste the token from BotFather on the next line (no quotes, no spaces)
-TELEGRAM_BOT_TOKEN=
-"""
+INITIAL_ENV_TEMPLATE = "TELEGRAM_BOT_TOKEN=DISABLED\n"
 
 def scaffold_state_dir(state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -374,6 +372,12 @@ def cmd_link(args) -> None:
     os.chmod(env_path, 0o600)
     info(f"wrote token to {env_path}")
 
+    # containers.json에 botToken 저장 (start/stop 시 .env 토큰 교체에 사용)
+    data = load_containers()
+    data["containers"][label]["botToken"] = token
+    save_containers(data)
+    info(f"saved token to containers.json")
+
     # try to derive bot username by hitting Telegram's getMe (best effort)
     bot_username = _try_fetch_bot_username(token)
     if bot_username:
@@ -411,15 +415,47 @@ def _container_env(c: dict) -> dict[str, str]:
     return {"TELEGRAM_STATE_DIR": c["stateDir"]}
 
 
-def _require_token(c: dict) -> None:
+# ----- token isolation helpers -----------------------------------------------
+
+def activate_token(label: str) -> None:
+    """containers.json에서 botToken을 읽어 state dir의 .env에 기록한다."""
+    data = load_containers()
+    c = data["containers"][label]
+    token = c.get("botToken")
+    if not token:
+        die(f"container '{label}'에 botToken이 없습니다. 먼저 clbg link {label} <token>을 실행하세요.")
     env_path = Path(c["stateDir"]) / ".env"
-    if not env_path.exists() or "TELEGRAM_BOT_TOKEN=" not in env_path.read_text():
-        die(f"no bot token in {env_path}. Run: clbg link {Path(c['cwd']).name} <token>")
+    env_path.write_text(f"TELEGRAM_BOT_TOKEN={token}\n")
+    os.chmod(env_path, 0o600)
+
+
+def deactivate_token(label: str) -> None:
+    """state dir의 .env를 DISABLED로 교체한다."""
+    c = get_container(label)
+    env_path = Path(c["stateDir"]) / ".env"
+    env_path.write_text("TELEGRAM_BOT_TOKEN=DISABLED\n")
+    os.chmod(env_path, 0o600)
+
+
+def _require_token(c: dict) -> None:
+    """토큰이 사용 가능한 상태인지 확인한다. .env의 DISABLED 값도 '토큰 없음'으로 처리."""
+    label = Path(c["cwd"]).name
+    # containers.json의 botToken 필드 확인
+    data = load_containers()
+    container = data.get("containers", {}).get(label, {})
+    stored_token = container.get("botToken")
+    if stored_token:
+        return  # containers.json에 토큰이 저장되어 있으면 OK (start 시 activate_token이 .env에 기록)
+    # containers.json에 없으면 .env 확인 (하위 호환)
+    env_path = Path(c["stateDir"]) / ".env"
+    if not env_path.exists():
+        die(f"no bot token in {env_path}. Run: clbg link {label} <token>")
     content = env_path.read_text()
     for line in content.splitlines():
-        if line.startswith("TELEGRAM_BOT_TOKEN=") and line.split("=", 1)[1].strip():
+        stripped = line.split("=", 1)[1].strip() if "=" in line else ""
+        if line.startswith("TELEGRAM_BOT_TOKEN=") and stripped and stripped != "DISABLED":
             return
-    die(f"empty bot token in {env_path}. Run: clbg link {Path(c['cwd']).name} <token>")
+    die(f"no bot token configured. Run: clbg link {label} <token>")
 
 
 def cmd_start(args) -> None:
@@ -431,6 +467,10 @@ def cmd_start(args) -> None:
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
+
+    # .env에 실제 토큰 기록 (토큰 격리: start 시 활성화)
+    activate_token(label)
+    info(f"activated token for {label}")
 
     new_uuid = str(uuid.uuid4())
     cmd = _build_claude_cmd(["--session-id", new_uuid])
@@ -452,6 +492,10 @@ def cmd_resume(args) -> None:
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
+
+    # .env에 실제 토큰 기록 (토큰 격리: resume 시 활성화)
+    activate_token(label)
+    info(f"activated token for {label}")
 
     project = read_claude_json_project(Path(c["cwd"]))
     last_id = project.get("lastSessionId")
@@ -485,6 +529,9 @@ def cmd_restart(args) -> None:
     if tmux_has(tmux_name):
         info(f"stopping {tmux_name}")
         tmux_kill(tmux_name)
+        # stop 시 토큰 비활성화 (polling 경쟁 방지)
+        deactivate_token(label)
+        info(f"deactivated token for {label}")
         import time; time.sleep(0.5)
     cmd_resume(args)
 
@@ -499,6 +546,9 @@ def cmd_stop(args) -> None:
         return
     tmux_kill(tmux_name)
     info(f"{tmux_name} stopped")
+    # 토큰 비활성화 — 다른 세션에서 동일 토큰으로 polling 경쟁 방지
+    deactivate_token(label)
+    info(f"deactivated token for {label}")
 
 
 def cmd_attach(args) -> None:
