@@ -517,10 +517,6 @@ def cmd_resume(args) -> None:
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
 
-    # .env에 실제 토큰 기록 (토큰 격리: resume 시 활성화)
-    activate_token(label)
-    info(f"activated token for {label}")
-
     project = read_claude_json_project(Path(c["cwd"]))
     last_id = project.get("lastSessionId")
     if not last_id:
@@ -535,6 +531,10 @@ def cmd_resume(args) -> None:
         info(f"last session {last_id} jsonl missing — starting fresh instead")
         cmd_start(args)
         return
+
+    # activate_token은 여기서만 호출 (fallback 시 cmd_start가 자체 호출)
+    activate_token(label)
+    info(f"activated token for {label}")
 
     cmd = _build_claude_cmd(["--resume", last_id])
     info(f"resuming session {last_id} in tmux '{tmux_name}'")
@@ -729,6 +729,8 @@ def cmd_rm(args) -> None:
     if tmux_has(tmux_name):
         info(f"killing {tmux_name}")
         tmux_kill(tmux_name)
+        deactivate_token(label)
+        info(f"deactivated token for {label}")
 
     if state_dir.exists():
         info(f"removing {state_dir}")

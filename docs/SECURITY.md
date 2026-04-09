@@ -65,8 +65,8 @@ shell access.
 
 ### containers.json의 botToken 필드
 
-`clbg link`는 토큰을 `.env`뿐만 아니라 `~/.claude-bg/containers.json`의
-`botToken` 필드에도 저장한다. 이 필드는 `clbg start`/`clbg resume` 시
+`clbg link`는 토큰을 `~/.claude-bg/containers.json`의 `botToken` 필드에
+저장한다 (`.env`에는 기록하지 않음). 이 필드는 `clbg start`/`clbg resume` 시
 `.env`에 실제 토큰을 기록하고, `clbg stop` 시 `DISABLED`로 교체하는
 토큰 격리 메커니즘의 핵심이다.
 
