@@ -367,33 +367,32 @@ def cmd_link(args) -> None:
 
     c = get_container(label)
 
-    # 세션이 실행 중이면 경고
+    # 세션이 실행 중이면 .env 덮어쓰기를 스킵 (containers.json만 업데이트)
     tmux_name = c["tmuxSession"]
-    if tmux_has(tmux_name):
-        print(yellow("세션이 실행 중입니다. 토큰 변경을 적용하려면 clbg restart " + label + "을 실행하세요."))
+    session_running = tmux_has(tmux_name)
 
-    state_dir = Path(c["stateDir"])
-    env_path = state_dir / ".env"
-
-    env_path.write_text(f"TELEGRAM_BOT_TOKEN={token}\n")
-    os.chmod(env_path, 0o600)
-    info(f"wrote token to {env_path}")
-
-    # containers.json에 botToken 저장 (start/stop 시 .env 토큰 교체에 사용)
+    # containers.json에 botToken과 botUsername 저장 (한 번의 load/save 블록)
     data = load_containers()
     data["containers"][label]["botToken"] = token
-    save_containers(data)
-    info(f"saved token to containers.json")
-
-    # try to derive bot username by hitting Telegram's getMe (best effort)
     bot_username = _try_fetch_bot_username(token)
     if bot_username:
-        data = load_containers()
         data["containers"][label]["botUsername"] = bot_username
-        save_containers(data)
+    save_containers(data)
+    info(f"saved token to containers.json")
+    if bot_username:
         info(f"bot username: @{bot_username}")
     else:
         info("couldn't fetch bot username (offline? network error?) — will show as '?'")
+
+    if session_running:
+        print(yellow(f"세션이 실행 중이므로 .env는 변경하지 않았습니다."))
+        print(yellow(f"clbg restart {label}로 적용하세요."))
+    else:
+        state_dir = Path(c["stateDir"])
+        env_path = state_dir / ".env"
+        env_path.write_text(f"TELEGRAM_BOT_TOKEN={token}\n")
+        os.chmod(env_path, 0o600)
+        info(f"wrote token to {env_path}")
 
     print()
     print(bold("Linked. Next:"))
@@ -443,7 +442,8 @@ def activate_token(label: str) -> None:
             other_env = Path(other_c["stateDir"]) / ".env"
             if other_env.exists():
                 env_content = other_env.read_text()
-                if f"TELEGRAM_BOT_TOKEN={token}" in env_content:
+                if any(line.startswith("TELEGRAM_BOT_TOKEN=") and line.split("=", 1)[1].strip() == token
+                       for line in env_content.splitlines()):
                     other_env.write_text("TELEGRAM_BOT_TOKEN=DISABLED\n")
                     os.chmod(other_env, 0o600)
                     info(f"deactivated stale token in container '{other_label}'")
@@ -493,7 +493,8 @@ def _do_start_session(label: str, session_args: list[str], args) -> None:
     info(f"activated token for {label}")
 
     cmd = _build_claude_cmd(session_args)
-    info(f"launching tmux '{tmux_name}' with {session_args}")
+    flags = [a for a in session_args if a.startswith("--")]
+    info(f"launching tmux '{tmux_name}' with flags: {flags}")
     tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
     if args.bg:
         print(f"started detached. Attach: clbg attach {label}")
@@ -551,6 +552,7 @@ def cmd_restart(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
+    _require_token(c, label)
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
         info(f"stopping {tmux_name}")
