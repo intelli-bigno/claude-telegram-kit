@@ -265,14 +265,18 @@ def scaffold_cwd(cwd: Path) -> None:
     # on-stop.sh 생성 (템플릿 기반, {memory_dir} 치환)
     kit_root = Path(__file__).resolve().parent.parent
     on_stop_tpl = kit_root / "templates" / "on-stop.sh"
+    if not on_stop_tpl.exists():
+        info(f"on-stop.sh 템플릿을 찾을 수 없습니다: {on_stop_tpl}")
     if on_stop_tpl.exists() and not on_stop_path.exists():
         content = on_stop_tpl.read_text()
         content = content.replace("{memory_dir}", str(memory_dir))
         on_stop_path.write_text(content)
         os.chmod(on_stop_path, 0o755)
+        if "{memory_dir}" in on_stop_path.read_text():
+            info(f"WARNING: on-stop.sh에 미치환 플레이스홀더 '{{memory_dir}}'가 남아있습니다: {on_stop_path}")
 
     # .claude/settings.json 생성 (템플릿 기반, {on_stop_path} 치환)
-    hooks_tpl = kit_root / "templates" / "hooks-settings.json"
+    hooks_tpl = kit_root / "templates" / "hooks-settings.json.tpl"
     if hooks_tpl.exists() and not settings_path.exists():
         content = hooks_tpl.read_text()
         content = content.replace("{on_stop_path}", str(on_stop_path))
@@ -407,9 +411,13 @@ def cmd_link(args) -> None:
     if bot_username:
         data = load_containers()
         data["containers"][label]["botUsername"] = bot_username
+        data["containers"][label]["botToken"] = token
         save_containers(data)
         info(f"bot username: @{bot_username}")
     else:
+        data = load_containers()
+        data["containers"][label]["botToken"] = token
+        save_containers(data)
         info("couldn't fetch bot username (offline? network error?) — will show as '?'")
 
     print()
@@ -463,18 +471,10 @@ activate_token() {{
 import json, sys
 try:
     d = json.load(open('$CONTAINERS_JSON'))
-    c = d.get('containers',{{}}).get('$LABEL',{{}})
-    sd = c.get('stateDir','')
-    # read bot token from access or containers
-    import os
-    env_path = os.path.join(sd, '.env')
-    for line in open(env_path):
-        if line.startswith('TELEGRAM_BOT_TOKEN='):
-            t = line.split('=',1)[1].strip()
-            if t and t != 'DISABLED':
-                print(t)
-                sys.exit(0)
-except Exception as e:
+    t = d['containers']['$LABEL']['botToken']
+    if t:
+        print(t)
+except Exception:
     pass
 " 2>/dev/null)
   if [ -z "$token" ]; then
@@ -508,6 +508,8 @@ except: pass
 
   SESSION_POOL="$HOME/.claude/projects/$(echo "$CWD" | sed 's|/|-|g')"
 
+  LAST_SUCCESS=$(date +%s)
+
   if [ -n "$LAST_ID" ] && [ -f "$SESSION_POOL/$LAST_ID.jsonl" ]; then
     echo "[$(date)] Resuming session $LAST_ID" | tee -a "$RESTART_LOG"
     "$CLAUDE_BIN" --channels "$PLUGIN_CHANNEL" --dangerously-skip-permissions --resume "$LAST_ID"
@@ -517,12 +519,11 @@ except: pass
     "$CLAUDE_BIN" --channels "$PLUGIN_CHANNEL" --dangerously-skip-permissions --session-id "$NEW_ID"
   fi
 
-  # Crash loop detection
+  # Crash loop detection: 5분 이상 실행 후 종료 시에만 RETRIES 리셋
   NOW=$(date +%s)
   ELAPSED=$((NOW - LAST_SUCCESS))
   if [ $ELAPSED -gt 300 ]; then
     RETRIES=0
-    LAST_SUCCESS=$NOW
   fi
 
   RETRIES=$((RETRIES + 1))
