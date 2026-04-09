@@ -387,6 +387,50 @@ runs, so we don't have to sum event-by-event.
 
 ---
 
+## 자동 재시작 (Auto-restart)
+
+`clbg start` 및 `clbg resume`는 기본적으로 bare `claude` 대신 **wrapper 스크립트**를
+tmux 안에서 실행합니다. wrapper는 다음을 처리합니다:
+
+### 동작 원리
+
+1. **세션 resume**: wrapper가 시작되면 `~/.claude.json`에서 `lastSessionId`를 읽고,
+   해당 세션의 jsonl 파일이 존재하면 `--resume`으로 이어서 실행합니다. jsonl이 없거나
+   `lastSessionId`가 없으면 새 UUID로 fresh session을 시작합니다.
+
+2. **자동 재시작 루프**: Claude Code 프로세스가 종료되면(OOM, 네트워크 오류, idle
+   타임아웃 등) wrapper가 자동으로 다시 시작합니다. 이전 세션의 컨텍스트가 resume을
+   통해 유지됩니다.
+
+3. **Crash loop 감지**: 5분 이내에 반복 종료가 발생하면 재시작 카운터가 증가합니다.
+   20회 초과 시 300초 백오프 후 카운터를 리셋합니다. 재시작 간격은
+   `5 * min(retries, 5)` 초로 점진적으로 증가합니다.
+
+4. **토큰 활성화/비활성화**: wrapper 시작 시 `.env`에 실제 봇 토큰을 기록하고,
+   wrapper 종료 시(루프 탈출, SIGTERM, SIGINT) `.env`를 `DISABLED`로 변경합니다.
+   이를 통해 wrapper가 죽은 상태에서 다른 프로세스가 같은 토큰으로 polling하는
+   충돌을 방지합니다.
+
+### 파일 위치
+
+```
+~/.claude-bg/<label>/
+├── run.sh          ← _generate_wrapper()가 자동 생성 (직접 편집 금지)
+└── restart.log     ← 재시작 이벤트 로그
+```
+
+### 일회성 실행 (--no-restart)
+
+`--no-restart` 플래그를 사용하면 wrapper 없이 bare `claude`를 직접 실행합니다.
+디버깅이나 단발성 테스트에 유용합니다:
+
+```bash
+clbg start mybot --bg --no-restart    # wrapper 없이 일회성 실행
+clbg start mybot --bg                 # 기본: auto-restart wrapper 사용
+```
+
+---
+
 ## Why not Telegram topics?
 
 We investigated. The official plugin's source has zero references to
