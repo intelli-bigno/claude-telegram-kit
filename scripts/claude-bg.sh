@@ -475,7 +475,7 @@ def _generate_wrapper(label: str) -> Path:
         '" "$ENV_PATH"\n'
         "    fi\n"
         "}}\n"
-        "trap cleanup EXIT SIGTERM\n"
+        "trap cleanup EXIT SIGTERM SIGINT\n"
         "\n"
         "while true; do\n"
         "    # --- determine session id ---\n"

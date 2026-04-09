@@ -437,7 +437,7 @@ a model that actually matches the tools you're working with.
 
 ### 정상 종료 처리
 
-wrapper에 `trap`이 걸려 있어, `EXIT` 또는 `SIGTERM` 시
+wrapper에 `trap`이 걸려 있어, `EXIT`, `SIGTERM`, `SIGINT` 시
 `~/.claude/channels/telegram-<label>/.env`의 `TELEGRAM_BOT_TOKEN`을 `DISABLED`로
 교체한다. 이는 종료된 container의 bot이 Telegram 메시지를 계속 consume하는 것을
 방지한다.
