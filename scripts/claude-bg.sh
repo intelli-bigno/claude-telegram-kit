@@ -30,7 +30,8 @@ Commands:
   clbg exec <label> <prompt>         run a one-shot prompt via `claude -p`
 
 Flags:
-  --bg    with start/resume/restart: create tmux detached instead of attaching
+  --bg            with start/resume/restart: create tmux detached instead of attaching
+  --no-restart    disable auto-restart wrapper; run bare claude (original behavior)
 """
 
 from __future__ import annotations
@@ -411,6 +412,141 @@ def _container_env(c: dict) -> dict[str, str]:
     return {"TELEGRAM_STATE_DIR": c["stateDir"]}
 
 
+# ----- auto-restart wrapper ---------------------------------------------------
+
+def _generate_wrapper(label: str) -> Path:
+    """
+    Generate ~/.claude-bg/<label>/run.sh — a bash wrapper that:
+      - reads lastSessionId from ~/.claude.json to --resume or --session-id
+      - restarts claude on crash with crash-loop detection
+      - logs restarts to restart.log
+      - marks .env as DISABLED on graceful exit
+    Returns the path to the generated run.sh.
+    """
+    c = get_container(label)
+    cwd = Path(c["cwd"])
+    state_dir = c["stateDir"]
+    run_sh = cwd / "run.sh"
+
+    claude_bin = str(CLAUDE_BIN)
+    channels_arg = PLUGIN_CHANNEL
+    claude_json = str(CLAUDE_JSON)
+    projects_root = str(PROJECTS_ROOT)
+    encoded_cwd = str(cwd).replace("/", "-")
+    restart_log = str(cwd / "restart.log")
+    env_path = str(Path(state_dir) / ".env")
+    cwd_str = str(cwd)
+
+    # Build the script as a plain string (no f-string) to avoid {{ }} noise.
+    # We do a single str.format() at the end with named placeholders.
+    script = (
+        "#!/usr/bin/env bash\n"
+        "# Auto-generated wrapper for clbg container '{label}'.\n"
+        "# Do not edit — regenerated on every 'clbg start' / 'clbg resume'.\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        'CLAUDE_BIN="{claude_bin}"\n'
+        'CHANNELS_ARG="{channels_arg}"\n'
+        'CLAUDE_JSON="{claude_json}"\n'
+        'CONTAINER_CWD="{cwd_str}"\n'
+        'PROJECTS_ROOT="{projects_root}"\n'
+        'ENCODED_CWD="{encoded_cwd}"\n'
+        'RESTART_LOG="{restart_log}"\n'
+        'ENV_PATH="{env_path}"\n'
+        "\n"
+        'export TELEGRAM_STATE_DIR="{state_dir}"\n'
+        "\n"
+        "MAX_CRASHES=20\n"
+        "STABLE_SECONDS=300\n"
+        "crash_count=0\n"
+        "last_start=0\n"
+        "\n"
+        "# On exit / SIGTERM: mark .env as DISABLED so the bot token is deactivated\n"
+        "cleanup() {{\n"
+        '    echo "[$(date -Iseconds)] wrapper exiting (signal or exit), marking DISABLED" >> "$RESTART_LOG"\n'
+        '    if [ -f "$ENV_PATH" ]; then\n'
+        """        sed -i.bak 's/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=DISABLED/' "$ENV_PATH"\n"""
+        "    fi\n"
+        "}}\n"
+        "trap cleanup EXIT SIGTERM\n"
+        "\n"
+        "while true; do\n"
+        "    # --- determine session id ---\n"
+        '    LAST_SESSION_ID=$(python3 -c "\n'
+        "import json, sys, pathlib\n"
+        "p = pathlib.Path(sys.argv[1])\n"
+        "if not p.exists():\n"
+        "    sys.exit(0)\n"
+        "data = json.loads(p.read_text())\n"
+        "proj = data.get('projects', {{}}).get(sys.argv[2], {{}})\n"
+        "sid = proj.get('lastSessionId', '')\n"
+        "if sid:\n"
+        "    print(sid)\n"
+        '" "$CLAUDE_JSON" "$CONTAINER_CWD" 2>/dev/null || true)\n'
+        "\n"
+        "    SESSION_ARGS=()\n"
+        '    if [ -n "$LAST_SESSION_ID" ]; then\n'
+        "        # verify jsonl exists\n"
+        '        JSONL_PATH="$PROJECTS_ROOT/$ENCODED_CWD/$LAST_SESSION_ID.jsonl"\n'
+        '        if [ -f "$JSONL_PATH" ]; then\n'
+        '            SESSION_ARGS=("--resume" "$LAST_SESSION_ID")\n'
+        '            echo "[$(date -Iseconds)] resuming session $LAST_SESSION_ID" >> "$RESTART_LOG"\n'
+        "        else\n"
+        """            SESSION_ARGS=("--session-id" "$(uuidgen | tr '[:upper:]' '[:lower:]')")\n"""
+        '            echo "[$(date -Iseconds)] last session jsonl missing, starting new session" >> "$RESTART_LOG"\n'
+        "        fi\n"
+        "    else\n"
+        """        SESSION_ARGS=("--session-id" "$(uuidgen | tr '[:upper:]' '[:lower:]')")\n"""
+        '        echo "[$(date -Iseconds)] no prior session, starting new session" >> "$RESTART_LOG"\n'
+        "    fi\n"
+        "\n"
+        "    # --- crash-loop detection ---\n"
+        "    now=$(date +%s)\n"
+        "    elapsed=$(( now - last_start ))\n"
+        '    if [ "$elapsed" -ge "$STABLE_SECONDS" ]; then\n'
+        "        crash_count=0\n"
+        "    fi\n"
+        "    last_start=$now\n"
+        "\n"
+        "    crash_count=$(( crash_count + 1 ))\n"
+        '    if [ "$crash_count" -gt "$MAX_CRASHES" ]; then\n'
+        '        echo "[$(date -Iseconds)] crash loop detected ($crash_count crashes), cooling down ${{STABLE_SECONDS}}s" >> "$RESTART_LOG"\n'
+        "        sleep $STABLE_SECONDS\n"
+        "        crash_count=0\n"
+        "    fi\n"
+        "\n"
+        "    # --- run claude ---\n"
+        "    set +e\n"
+        '    "$CLAUDE_BIN" \\\n'
+        '        --channels "$CHANNELS_ARG" \\\n'
+        "        --dangerously-skip-permissions \\\n"
+        '        "${{SESSION_ARGS[@]}}"\n'
+        "    EXIT_CODE=$?\n"
+        "    set -e\n"
+        "\n"
+        '    echo "[$(date -Iseconds)] claude exited with code $EXIT_CODE, restarting..." >> "$RESTART_LOG"\n'
+        "    sleep 2\n"
+        "done\n"
+    ).format(
+        label=label,
+        claude_bin=claude_bin,
+        channels_arg=channels_arg,
+        claude_json=claude_json,
+        cwd_str=cwd_str,
+        projects_root=projects_root,
+        encoded_cwd=encoded_cwd,
+        restart_log=restart_log,
+        env_path=env_path,
+        state_dir=state_dir,
+    )
+
+    run_sh.write_text(script)
+    os.chmod(run_sh, 0o755)
+    info(f"generated wrapper: {run_sh}")
+    return run_sh
+
+
 def _require_token(c: dict) -> None:
     env_path = Path(c["stateDir"]) / ".env"
     if not env_path.exists() or "TELEGRAM_BOT_TOKEN=" not in env_path.read_text():
@@ -432,14 +568,24 @@ def cmd_start(args) -> None:
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
 
-    new_uuid = str(uuid.uuid4())
-    cmd = _build_claude_cmd(["--session-id", new_uuid])
-    info(f"starting fresh session {new_uuid} in tmux '{tmux_name}'")
-    tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+    no_restart = getattr(args, "no_restart", False)
+
+    if no_restart:
+        # bare claude — original behavior, no wrapper
+        new_uuid = str(uuid.uuid4())
+        cmd = _build_claude_cmd(["--session-id", new_uuid])
+        info(f"starting fresh session {new_uuid} in tmux '{tmux_name}' (no-restart)")
+        tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+    else:
+        # wrapper-based auto-restart
+        run_sh = _generate_wrapper(label)
+        cmd = ["bash", str(run_sh)]
+        info(f"starting with auto-restart wrapper in tmux '{tmux_name}'")
+        tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+
     if args.bg:
         print(f"started detached. Attach: clbg attach {label}")
     else:
-        # execvp replaces this process; control doesn't return
         tmux_attach(tmux_name)
 
 
@@ -453,24 +599,34 @@ def cmd_resume(args) -> None:
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
 
-    project = read_claude_json_project(Path(c["cwd"]))
-    last_id = project.get("lastSessionId")
-    if not last_id:
-        info("no prior session found — starting fresh instead")
-        cmd_start(args)
-        return
+    no_restart = getattr(args, "no_restart", False)
 
-    # verify jsonl exists before calling --resume (avoids a hard fail)
-    encoded = str(Path(c["cwd"])).replace("/", "-")
-    jsonl = PROJECTS_ROOT / encoded / f"{last_id}.jsonl"
-    if not jsonl.exists():
-        info(f"last session {last_id} jsonl missing — starting fresh instead")
-        cmd_start(args)
-        return
+    if no_restart:
+        # bare claude — original behavior, no wrapper
+        project = read_claude_json_project(Path(c["cwd"]))
+        last_id = project.get("lastSessionId")
+        if not last_id:
+            info("no prior session found — starting fresh instead")
+            cmd_start(args)
+            return
 
-    cmd = _build_claude_cmd(["--resume", last_id])
-    info(f"resuming session {last_id} in tmux '{tmux_name}'")
-    tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+        encoded = str(Path(c["cwd"])).replace("/", "-")
+        jsonl = PROJECTS_ROOT / encoded / f"{last_id}.jsonl"
+        if not jsonl.exists():
+            info(f"last session {last_id} jsonl missing — starting fresh instead")
+            cmd_start(args)
+            return
+
+        cmd = _build_claude_cmd(["--resume", last_id])
+        info(f"resuming session {last_id} in tmux '{tmux_name}' (no-restart)")
+        tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+    else:
+        # wrapper-based auto-restart (wrapper handles session ID resolution)
+        run_sh = _generate_wrapper(label)
+        cmd = ["bash", str(run_sh)]
+        info(f"resuming with auto-restart wrapper in tmux '{tmux_name}'")
+        tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+
     if args.bg:
         print(f"resumed detached. Attach: clbg attach {label}")
     else:
@@ -689,6 +845,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--bg", action="store_true",
                         help="start tmux detached instead of attaching")
 
+    def _no_restart_flag(sp):
+        sp.add_argument("--no-restart", action="store_true",
+                        help="disable auto-restart wrapper; run bare claude (original behavior)")
+
     sp = sub.add_parser("new", help="create a new container")
     _label_arg(sp)
     sp.add_argument("--notes", help="free-form description")
@@ -700,15 +860,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_link)
 
     sp = sub.add_parser("start", help="start a fresh claude session for a container")
-    _label_arg(sp); _bg_flag(sp)
+    _label_arg(sp); _bg_flag(sp); _no_restart_flag(sp)
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("resume", help="resume the container's last session by ID")
-    _label_arg(sp); _bg_flag(sp)
+    _label_arg(sp); _bg_flag(sp); _no_restart_flag(sp)
     sp.set_defaults(func=cmd_resume)
 
     sp = sub.add_parser("restart", help="stop + resume")
-    _label_arg(sp); _bg_flag(sp)
+    _label_arg(sp); _bg_flag(sp); _no_restart_flag(sp)
     sp.set_defaults(func=cmd_restart)
 
     sp = sub.add_parser("stop", help="kill the container's tmux session")

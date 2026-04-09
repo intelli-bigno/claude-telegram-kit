@@ -399,3 +399,57 @@ Multi-bot is the clean alternative: separate processes, separate contexts,
 separate polling locks, separate everything. What you lose is the ability
 to group all bots under one chat in the Telegram sidebar; what you gain is
 a model that actually matches the tools you're working with.
+
+---
+
+## 자동 재시작 (Auto-restart)
+
+`clbg start` / `clbg resume` / `clbg restart`는 기본적으로 **wrapper 스크립트
+기반 자동 재시작** 모드로 동작한다. Claude Code 프로세스가 crash, OOM, 또는
+예기치 않은 이유로 종료되면 wrapper가 자동으로 재시작한다.
+
+### 동작 원리
+
+`clbg start <label>` 실행 시:
+
+1. `_generate_wrapper(label)`이 `~/.claude-bg/<label>/run.sh`를 생성한다.
+2. tmux 세션은 `bash run.sh`로 시작된다 (bare `claude` 대신).
+3. wrapper 내부의 `while true` 루프가 Claude Code를 실행하고, 종료 시 재시작한다.
+
+### 세션 복구
+
+매 루프 반복마다 wrapper는:
+
+- `~/.claude.json`에서 해당 container cwd의 `lastSessionId`를 python3로 읽는다.
+- `lastSessionId`가 있고 대응하는 `.jsonl` 파일이 존재하면 `--resume`으로 기존
+  세션을 이어간다.
+- 그렇지 않으면 `--session-id`로 새 UUID 세션을 시작한다.
+
+이 방식은 crash 후에도 기존 대화 컨텍스트를 유지할 수 있게 해준다.
+
+### Crash loop 감지
+
+연속 crash를 무한 재시작하지 않기 위한 보호 장치:
+
+- Claude가 5분(`STABLE_SECONDS`) 이상 정상 실행되면 crash 카운터를 리셋한다.
+- 카운터가 20회(`MAX_CRASHES`)를 초과하면 300초 대기 후 리셋한다.
+- 재시작 이력은 `~/.claude-bg/<label>/restart.log`에 기록된다.
+
+### 정상 종료 처리
+
+wrapper에 `trap`이 걸려 있어, `EXIT` 또는 `SIGTERM` 시
+`~/.claude/channels/telegram-<label>/.env`의 `TELEGRAM_BOT_TOKEN`을 `DISABLED`로
+교체한다. 이는 종료된 container의 bot이 Telegram 메시지를 계속 consume하는 것을
+방지한다.
+
+### `--no-restart` 플래그
+
+자동 재시작 없이 기존 방식(bare `claude` 직접 실행)으로 동작시키려면:
+
+```
+clbg start <label> --no-restart
+clbg resume <label> --no-restart
+clbg restart <label> --no-restart
+```
+
+디버깅이나 일회성 세션에 유용하다.
