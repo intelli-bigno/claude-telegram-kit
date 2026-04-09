@@ -206,6 +206,9 @@ any first-run output. Add `--bg` to stay detached if you're scripting.
 claude-telegram-kit/
 ├── scripts/
 │   └── claude-bg.sh                   # clbg — Python 3 container manager (~550 lines)
+├── templates/
+│   ├── on-stop.sh                     # Stop hook 템플릿 (세션 종료 시 메모리 로그)
+│   └── hooks-settings.json            # .claude/settings.json 템플릿 (hook 설정)
 ├── skills/
 │   └── telegram-bg-setup/
 │       └── SKILL.md                   # invocable skill that walks through the whole setup
@@ -219,6 +222,19 @@ claude-telegram-kit/
 ├── LICENSE                            # MIT (patch notes Apache 2.0 for upstream derivative work)
 └── README.md                          # this file
 ```
+
+---
+
+## Memory auto-save
+
+컨테이너 세션이 종료되면 Stop hook이 자동으로 `memory/session-log.md`에 종료
+시각을 기록합니다. `clbg new`가 컨테이너를 생성할 때 hook 스크립트와 설정이
+자동으로 scaffold됩니다.
+
+세션 중 중요한 결정이나 맥락은 Claude가 `memory/` 디렉토리에 직접 저장하도록
+CLAUDE.md에서 유도할 수 있습니다. 자세한 구조는
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)의 "메모리 자동 저장" 섹션을
+참고하세요.
 
 ---
 

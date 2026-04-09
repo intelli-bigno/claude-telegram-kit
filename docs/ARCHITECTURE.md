@@ -431,6 +431,44 @@ clbg start mybot --bg                 # 기본: auto-restart wrapper 사용
 
 ---
 
+## 메모리 자동 저장 (Memory Auto-save)
+
+세션이 종료될 때 자동으로 기록을 남기는 메커니즘입니다.
+
+### 동작 원리
+
+1. **Stop hook 트리거**: Claude Code의 Stop hook이 세션 종료 시 자동으로
+   `on-stop.sh`를 실행합니다. 이 스크립트는 `clbg new`가 컨테이너 cwd를
+   scaffold할 때 `templates/on-stop.sh` 템플릿으로부터 생성됩니다.
+
+2. **session-log.md 기록**: `on-stop.sh`는 `memory/session-log.md`에 종료
+   시각을 append합니다. 시간이 지나면 이 파일이 세션 히스토리 타임라인이 됩니다.
+
+3. **CLAUDE.md 유도**: 컨테이너의 CLAUDE.md에 "중요한 결정이나 맥락은 세션 종료
+   전에 memory/에 저장해주세요"라는 지시를 포함시켜, Claude가 사전에 중요 맥락을
+   memory/ 디렉토리에 마크다운 파일로 저장하도록 유도합니다.
+
+### 한계
+
+- **crash 시 미실행**: Stop hook은 Claude Code가 정상적으로 종료될 때만
+  실행됩니다. OOM kill, SIGKILL, 네트워크 단절 등으로 프로세스가 비정상
+  종료되면 hook이 트리거되지 않습니다.
+- **기록 범위**: on-stop.sh는 종료 시각만 기록합니다. 세션 중 어떤 작업을
+  했는지는 Claude가 CLAUDE.md 지시에 따라 memory/에 직접 남겨야 합니다.
+
+### 파일 위치
+
+```
+~/.claude-bg/<label>/
+├── .claude/
+│   └── settings.json    ← Stop hook 설정 (hooks-settings.json 템플릿 기반)
+├── on-stop.sh           ← Stop hook 스크립트 (on-stop.sh 템플릿 기반)
+└── memory/
+    └── session-log.md   ← 세션 종료 시각 로그 (자동 생성)
+```
+
+---
+
 ## Why not Telegram topics?
 
 We investigated. The official plugin's source has zero references to
