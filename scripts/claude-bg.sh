@@ -58,6 +58,11 @@ CLAUDE_BIN = HOME / ".claude" / "local" / "claude"
 PROJECTS_ROOT = HOME / ".claude" / "projects"
 PLUGIN_CHANNEL = "plugin:telegram@claude-plugins-official"
 
+# Kit root and templates (resolved relative to this script, not cwd)
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = SCRIPT_DIR / "templates"
+VALID_PERSONAS = ("default", "coder", "researcher")
+
 # Base args for interactive bg claude. --channels makes the plugin deliver
 # messages, --dangerously-skip-permissions lets us run unattended (allowlist
 # is the real security boundary, see kit docs).
@@ -238,7 +243,7 @@ def scaffold_state_dir(state_dir: Path) -> None:
         save_json_atomic(access_path, INITIAL_ACCESS_JSON, mode=0o600)
 
 
-def scaffold_cwd(cwd: Path) -> None:
+def scaffold_cwd(cwd: Path, label: str, persona: str = "default", claude_md: Optional[str] = None) -> None:
     cwd.mkdir(parents=True, exist_ok=True)
     marker = cwd / "README.md"
     if not marker.exists():
@@ -249,6 +254,31 @@ def scaffold_cwd(cwd: Path) -> None:
             f"Do not store real work here — the container claude may run with\n"
             f"--dangerously-skip-permissions.\n"
         )
+
+    # CLAUDE.md — persona template (skip if already exists)
+    claude_md_path = cwd / "CLAUDE.md"
+    if not claude_md_path.exists():
+        if claude_md:
+            # custom template path provided by --claude-md
+            custom_path = Path(claude_md)
+            if not custom_path.exists():
+                die(f"custom CLAUDE.md template not found: {custom_path}")
+            template_content = custom_path.read_text()
+        else:
+            template_path = TEMPLATES_DIR / f"{persona}.md"
+            if not template_path.exists():
+                die(f"persona template not found: {template_path}")
+            template_content = template_path.read_text()
+        claude_md_path.write_text(template_content.replace("{label}", label))
+        info(f"created CLAUDE.md (persona: {persona if not claude_md else 'custom'})")
+
+    # memory/ directory + index file
+    memory_dir = cwd / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    memory_index = memory_dir / "MEMORY.md"
+    if not memory_index.exists():
+        memory_index.write_text("")
+        info(f"created memory/ directory")
 
 
 # ----- tmux wrappers ---------------------------------------------------------
@@ -323,7 +353,7 @@ def cmd_new(args) -> None:
     tmux_name = container_tmux_name(label)
 
     info(f"scaffolding cwd: {cwd}")
-    scaffold_cwd(cwd)
+    scaffold_cwd(cwd, label, persona=args.persona, claude_md=args.claude_md)
 
     info(f"scaffolding state dir: {state_dir}")
     scaffold_state_dir(state_dir)
@@ -692,6 +722,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("new", help="create a new container")
     _label_arg(sp)
     sp.add_argument("--notes", help="free-form description")
+    sp.add_argument("--persona", choices=VALID_PERSONAS, default="default",
+                    help="CLAUDE.md persona template (default: default)")
+    sp.add_argument("--claude-md", metavar="PATH",
+                    help="path to a custom CLAUDE.md template (overrides --persona)")
     sp.set_defaults(func=cmd_new)
 
     sp = sub.add_parser("link", help="link a bot token to an existing container")

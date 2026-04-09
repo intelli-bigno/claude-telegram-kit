@@ -399,3 +399,43 @@ Multi-bot is the clean alternative: separate processes, separate contexts,
 separate polling locks, separate everything. What you lose is the ability
 to group all bots under one chat in the Telegram sidebar; what you gain is
 a model that actually matches the tools you're working with.
+
+---
+
+## CLAUDE.md 페르소나 및 메모리
+
+각 컨테이너는 생성 시 자동으로 `CLAUDE.md` 파일과 `memory/` 디렉토리를 갖는다.
+
+### 페르소나 템플릿
+
+`templates/` 디렉토리에 세 가지 내장 템플릿이 있다:
+
+| 템플릿 | 용도 |
+|---|---|
+| `default.md` | 범용 도우미. 사용자 언어에 맞춰 응답 |
+| `coder.md` | 코딩 전문. 코드 분석, 버그 수정, 기능 개발 |
+| `researcher.md` | 리서치 전문. 조사, 비교 분석, 보고서 작성 |
+
+컨테이너 생성 시 `--persona` 플래그로 선택하거나, `--claude-md`로 커스텀 템플릿 경로를
+지정할 수 있다:
+
+```
+clbg new mybot --persona coder
+clbg new mybot --claude-md ~/my-templates/custom.md
+```
+
+템플릿 내 `{label}` 플레이스홀더는 실제 컨테이너 라벨로 치환된다.
+이미 `CLAUDE.md`가 존재하는 경우 덮어쓰지 않는다.
+
+### memory/ 디렉토리
+
+```
+~/.claude-bg/<label>/
+├── CLAUDE.md          ← 페르소나 + 지시사항
+└── memory/
+    └── MEMORY.md      ← 빈 인덱스 파일 (Claude가 채워감)
+```
+
+`CLAUDE.md`의 "메모리 관리" 섹션이 Claude에게 `memory/` 활용을 지시한다.
+세션이 resume될 때 Claude는 `memory/`를 먼저 읽어 이전 맥락을 파악한다.
+이를 통해 세션 간 연속성이 보장되며, 긴 대화에서도 핵심 정보가 유실되지 않는다.
