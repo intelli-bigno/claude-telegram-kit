@@ -277,6 +277,8 @@ def scaffold_cwd(cwd: Path) -> None:
 
     # .claude/settings.json 생성 (템플릿 기반, {on_stop_path} 치환)
     hooks_tpl = kit_root / "templates" / "hooks-settings.json.tpl"
+    if not hooks_tpl.exists():
+        info(f"hooks 설정 템플릿을 찾을 수 없습니다: {hooks_tpl}")
     if hooks_tpl.exists() and not settings_path.exists():
         content = hooks_tpl.read_text()
         content = content.replace("{on_stop_path}", str(on_stop_path))
