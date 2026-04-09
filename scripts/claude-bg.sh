@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -365,6 +366,12 @@ def cmd_link(args) -> None:
         die("token doesn't look like a valid Telegram bot token (expected '123456789:AA...')")
 
     c = get_container(label)
+
+    # 세션이 실행 중이면 경고
+    tmux_name = c["tmuxSession"]
+    if tmux_has(tmux_name):
+        print(yellow("세션이 실행 중입니다. 토큰 변경을 적용하려면 clbg restart " + label + "을 실행하세요."))
+
     state_dir = Path(c["stateDir"])
     env_path = state_dir / ".env"
 
@@ -418,12 +425,28 @@ def _container_env(c: dict) -> dict[str, str]:
 # ----- token isolation helpers -----------------------------------------------
 
 def activate_token(label: str) -> None:
-    """containers.json에서 botToken을 읽어 state dir의 .env에 기록한다."""
+    """containers.json에서 botToken을 읽어 state dir의 .env에 기록한다.
+    동일 botToken을 가진 다른 컨테이너의 .env가 실제 토큰 상태이면
+    먼저 DISABLED로 교체하여 crash/재부팅 후에도 토큰 중복을 방지한다."""
     data = load_containers()
     c = data["containers"][label]
     token = c.get("botToken")
     if not token:
         die(f"container '{label}'에 botToken이 없습니다. 먼저 clbg link {label} <token>을 실행하세요.")
+    if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", token):
+        die(f"container '{label}'의 botToken이 유효하지 않습니다. clbg link {label} <token>으로 재설정하세요.")
+    # 동일 토큰을 가진 다른 컨테이너의 .env를 DISABLED로 교체
+    for other_label, other_c in data.get("containers", {}).items():
+        if other_label == label:
+            continue
+        if other_c.get("botToken") == token:
+            other_env = Path(other_c["stateDir"]) / ".env"
+            if other_env.exists():
+                env_content = other_env.read_text()
+                if f"TELEGRAM_BOT_TOKEN={token}" in env_content:
+                    other_env.write_text("TELEGRAM_BOT_TOKEN=DISABLED\n")
+                    os.chmod(other_env, 0o600)
+                    info(f"deactivated stale token in container '{other_label}'")
     env_path = Path(c["stateDir"]) / ".env"
     env_path.write_text(f"TELEGRAM_BOT_TOKEN={token}\n")
     os.chmod(env_path, 0o600)
@@ -431,15 +454,17 @@ def activate_token(label: str) -> None:
 
 def deactivate_token(label: str) -> None:
     """state dir의 .env를 DISABLED로 교체한다."""
-    c = get_container(label)
+    data = load_containers()
+    c = data["containers"].get(label)
+    if not c:
+        return  # 이미 삭제된 컨테이너는 무시
     env_path = Path(c["stateDir"]) / ".env"
     env_path.write_text("TELEGRAM_BOT_TOKEN=DISABLED\n")
     os.chmod(env_path, 0o600)
 
 
-def _require_token(c: dict) -> None:
+def _require_token(c: dict, label: str) -> None:
     """토큰이 사용 가능한 상태인지 확인한다. .env의 DISABLED 값도 '토큰 없음'으로 처리."""
-    label = Path(c["cwd"]).name
     # containers.json의 botToken 필드 확인
     data = load_containers()
     container = data.get("containers", {}).get(label, {})
@@ -458,50 +483,55 @@ def _require_token(c: dict) -> None:
     die(f"no bot token configured. Run: clbg link {label} <token>")
 
 
+def _do_start_session(label: str, session_args: list[str], args) -> None:
+    """cmd_start와 cmd_resume 공용 내부 함수.
+    activate_token을 한 번만 호출하고 tmux 세션을 시작한다."""
+    c = get_container(label)
+    tmux_name = c["tmuxSession"]
+
+    activate_token(label)
+    info(f"activated token for {label}")
+
+    cmd = _build_claude_cmd(session_args)
+    info(f"launching tmux '{tmux_name}' with {session_args}")
+    tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
+    if args.bg:
+        print(f"started detached. Attach: clbg attach {label}")
+    else:
+        tmux_attach(tmux_name)
+
+
 def cmd_start(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
 
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
 
-    # .env에 실제 토큰 기록 (토큰 격리: start 시 활성화)
-    activate_token(label)
-    info(f"activated token for {label}")
-
     new_uuid = str(uuid.uuid4())
-    cmd = _build_claude_cmd(["--session-id", new_uuid])
-    info(f"starting fresh session {new_uuid} in tmux '{tmux_name}'")
-    tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
-    if args.bg:
-        print(f"started detached. Attach: clbg attach {label}")
-    else:
-        # execvp replaces this process; control doesn't return
-        tmux_attach(tmux_name)
+    info(f"starting fresh session {new_uuid}")
+    _do_start_session(label, ["--session-id", new_uuid], args)
 
 
 def cmd_resume(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
 
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
         die(f"tmux session '{tmux_name}' already running. Use: clbg attach {label}")
 
-    # .env에 실제 토큰 기록 (토큰 격리: resume 시 활성화)
-    activate_token(label)
-    info(f"activated token for {label}")
-
     project = read_claude_json_project(Path(c["cwd"]))
     last_id = project.get("lastSessionId")
     if not last_id:
         info("no prior session found — starting fresh instead")
-        cmd_start(args)
+        new_uuid = str(uuid.uuid4())
+        _do_start_session(label, ["--session-id", new_uuid], args)
         return
 
     # verify jsonl exists before calling --resume (avoids a hard fail)
@@ -509,16 +539,12 @@ def cmd_resume(args) -> None:
     jsonl = PROJECTS_ROOT / encoded / f"{last_id}.jsonl"
     if not jsonl.exists():
         info(f"last session {last_id} jsonl missing — starting fresh instead")
-        cmd_start(args)
+        new_uuid = str(uuid.uuid4())
+        _do_start_session(label, ["--session-id", new_uuid], args)
         return
 
-    cmd = _build_claude_cmd(["--resume", last_id])
-    info(f"resuming session {last_id} in tmux '{tmux_name}'")
-    tmux_new_session(tmux_name, Path(c["cwd"]), cmd, _container_env(c), detached=args.bg)
-    if args.bg:
-        print(f"resumed detached. Attach: clbg attach {label}")
-    else:
-        tmux_attach(tmux_name)
+    info(f"resuming session {last_id}")
+    _do_start_session(label, ["--resume", last_id], args)
 
 
 def cmd_restart(args) -> None:
@@ -529,10 +555,10 @@ def cmd_restart(args) -> None:
     if tmux_has(tmux_name):
         info(f"stopping {tmux_name}")
         tmux_kill(tmux_name)
-        # stop 시 토큰 비활성화 (polling 경쟁 방지)
-        deactivate_token(label)
-        info(f"deactivated token for {label}")
-        import time; time.sleep(0.5)
+        time.sleep(0.5)
+    # tmux 유무와 관계없이 항상 토큰 비활성화 (crash 후 .env에 토큰이 남아있을 수 있음)
+    deactivate_token(label)
+    info(f"deactivated token for {label}")
     cmd_resume(args)
 
 
@@ -565,7 +591,7 @@ def cmd_exec(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
     prompt = args.prompt
 
     cmd = [
@@ -705,6 +731,10 @@ def cmd_rm(args) -> None:
     if tmux_has(tmux_name):
         info(f"killing {tmux_name}")
         tmux_kill(tmux_name)
+
+    # 삭제 전 .env 토큰 비활성화
+    deactivate_token(label)
+    info(f"deactivated token for {label}")
 
     if state_dir.exists():
         info(f"removing {state_dir}")
