@@ -1,210 +1,251 @@
 # claude-telegram-kit
 
-Production-ready setup for running [Claude Code](https://claude.com/claude-code)
-as a persistent Telegram assistant — **detached in tmux**, **always on**,
-**with proper typing indicators**, **without session hijacking**, and
-**with multi-bot support** for running several independent sessions side by side.
+Run [Claude Code](https://claude.com/claude-code) as a persistent Telegram
+assistant. Multiple independent sessions, each bound to its own Telegram bot,
+each isolated from the others, each always-on in tmux. One command to create
+a new container, one command to list them all.
 
-Built on top of the official
+Built on the official
 [`telegram@claude-plugins-official`](https://github.com/anthropics/claude-plugins)
-plugin. This kit covers the operational gaps: flags you must pass, gotchas
-that silently break the channel, and a patch that keeps the "typing…"
-indicator alive across long-running thinks.
+plugin. This kit is the operational glue that makes it actually work
+unattended: the flags you have to pass, the state files you have to pre-seed
+to avoid one-shot dialogs, the container model for running N independent
+bots, and a patch for Telegram's 5-second "typing…" cap.
 
 ---
 
-## Why this exists
+## Quick demo
 
-The official Telegram plugin works, but getting it to run **reliably in the
-background** hits a long chain of non-obvious pitfalls. This kit packages
-every landmine we hit into:
+```bash
+$ clbg new work --notes "business stuff"
+[clbg] scaffolding cwd: /Users/me/.claude-bg/work
+[clbg] scaffolding state dir: /Users/me/.claude/channels/telegram-work
+[clbg] injecting trust into ~/.claude.json for /Users/me/.claude-bg/work
+[clbg] registered in containers.json
 
-- A single setup Skill (`/telegram-bg-setup`) that walks through the whole
-  thing end to end
-- A tmux launcher (`clbg`) with the correct flags already baked in
-- A patch for the `typing…` indicator (upstream only fires it once, giving
-  you ~5 seconds of feedback even when Claude thinks for 3 minutes)
-- A multi-bot pattern doc so you can run N independent sessions
-- A troubleshooting log of the actual failures and how to spot them
+Next steps:
+  1. Open @BotFather on Telegram, send /newbot, create a new bot
+  2. Copy the token (looks like 123456789:AAH...)
+  3. Link it to this container:
+       clbg link work <token>
+  ...
 
-**Nothing here bypasses the plugin** — we use it as-is plus one documented
-patch. Upgrading the plugin just means reapplying the patch (or dropping it
-if upstream merges the fix).
+$ clbg link work 123456789:AAH...
+[clbg] wrote token to /Users/me/.claude/channels/telegram-work/.env
+[clbg] bot username: @my_work_assistant_bot
+Linked. Next:
+  clbg start work    # start the bg session
+
+$ clbg start work
+# (attaches to a new tmux session, claude boots, press Ctrl+B D to detach)
+
+$ clbg list
+LABEL  BOT                      STATUS   LAST SESSION  COST    TOKENS  NOTES
+main   @my_main_bot             running  a7f3c812…    $12.40  8.2M    personal assistant
+work   @my_work_assistant_bot   running  d48ab503…    $0.00   0       business stuff
+```
+
+You now have two completely independent Claude sessions, each reachable from
+a different Telegram bot, running unattended in tmux. No polling conflicts,
+no session hijacking, no stuck one-shot dialogs.
 
 ---
 
-## Quick status: what this fixes
+## What this fixes
+
+Operating Claude Code as a detached Telegram listener looks simple and turns
+out to be a minefield. This kit is every fix we had to make, packaged.
 
 | Symptom | Root cause | Fix in this kit |
 | --- | --- | --- |
-| MCP server starts but messages never reach Claude | Session launched without `--channels` flag → `Channel notifications skipped` | `clbg` always passes `--channels plugin:telegram@claude-plugins-official` |
+| MCP server starts but messages never reach Claude | Session launched without `--channels` flag → `Channel notifications skipped` in MCP logs | `clbg` always passes `--channels plugin:telegram@claude-plugins-official` |
 | Background session freezes on first Bash call | Permission prompt has no one to answer it in detached tmux | `--dangerously-skip-permissions` + strict `allowFrom` allowlist as the real defense |
-| Background session "continues" a totally unrelated conversation | `claude --continue` picks the most-recent jsonl in the cwd's session pool, and `$HOME` pools every session ever launched there | Dedicated cwd `~/.claude-bg/` isolates the bg session pool |
-| Telegram "typing…" disappears after 5 seconds even though Claude is still thinking | Upstream plugin calls `sendChatAction('typing')` exactly once per message | `patches/telegram-typing-indicator.patch` refreshes every 4.5s until `reply` is sent (30-min hard cap) |
-| Two Claude sessions both polling the same bot — race conditions, missed replies | Telegram Bot API only allows one `getUpdates` client per token | `docs/MULTI-BOT.md`: use `TELEGRAM_STATE_DIR` + separate bot per session |
-| First launch from a new cwd re-prompts for folder trust | Claude Code stores trust per-directory | Documented; one attach to press Enter and you're done |
+| Background session "continues" a totally unrelated conversation | `claude --continue` picks the most-recent jsonl in the cwd's session pool, and `$HOME` pools every session ever launched there | Per-container cwd under `~/.claude-bg/<label>/` + `--resume <explicit UUID>` (never `--continue`) |
+| `clbg restart` asks "Yes, I trust this folder?" on a detached session | Folder trust prompt blocks until human input | Pre-inject `hasTrustDialogAccepted: true` into `~/.claude.json` at `clbg new` time |
+| `clbg restart` asks "Resume from summary / full?" on a large old session | Resume mode prompt blocks until human input | Use `--resume <exact UUID>` (the prompt only fires on `--continue` fallback) |
+| Telegram "typing…" disappears after 5 seconds while Claude is still thinking | Upstream plugin calls `sendChatAction('typing')` exactly once per message | `patches/telegram-typing-indicator.patch` refreshes every 4.5s until `reply` is sent (30-min hard cap) |
+| Two Claude sessions fighting over the same bot token | Telegram Bot API only allows one `getUpdates` client per token | Each container has its own bot and `TELEGRAM_STATE_DIR` — no races |
+| "Which bg session is talking to which bot?" management chaos | No visibility | `clbg list` shows the whole fleet: bot, status, last session id, cost, tokens |
 
 ---
 
 ## Prerequisites
 
-- [Claude Code](https://claude.com/claude-code) installed
+- [Claude Code](https://claude.com/claude-code) installed, and run at least
+  once (needed to create `~/.claude.json`)
 - [Bun](https://bun.sh) (required by the Telegram plugin)
-- `tmux` (for the background runner)
-- A Telegram account and the ability to talk to [@BotFather](https://t.me/BotFather)
+- `tmux`
+- Python 3.9+ (macOS ships with 3.9+; Linux usually has it)
+- Telegram account + ability to talk to [@BotFather](https://t.me/BotFather)
 
 ---
 
-## Quick start (single bot, one background session)
-
-**1. Create a bot with BotFather**
-
-Open [@BotFather](https://t.me/BotFather), send `/newbot`, pick a name and
-username. Copy the token it gives you — it looks like
-`123456789:AAH...`.
-
-**2. Install the plugin and give it the token**
+## Install
 
 ```bash
-claude
-```
-Then inside Claude:
-```
-/plugin install telegram@claude-plugins-official
-/reload-plugins
-/telegram:configure 123456789:AAH...
-```
-
-**3. Install this kit**
-
-```bash
+# clone
 git clone https://github.com/intelli-bruce/claude-telegram-kit.git
 cd claude-telegram-kit
 
-# Put the launcher on your PATH (pick one)
-cp scripts/claude-bg.sh ~/.local/bin/clbg && chmod +x ~/.local/bin/clbg
-# or alias it
-echo "alias clbg='$(pwd)/scripts/claude-bg.sh'" >> ~/.zshrc
+# put clbg on your PATH (either option works)
+ln -s "$PWD/scripts/claude-bg.sh" ~/.local/bin/clbg
+# or
+echo "alias clbg='$PWD/scripts/claude-bg.sh'" >> ~/.zshrc && source ~/.zshrc
 
-# Create the dedicated bg working directory
-mkdir -p ~/.claude-bg
+# install the Telegram plugin inside Claude Code if you haven't already:
+claude
+#   /plugin install telegram@claude-plugins-official
+#   /reload-plugins
+#   /quit
 ```
 
-**4. Apply the typing indicator patch (recommended)**
+Apply the typing indicator patch (recommended — without it you'll stare at
+a dead chat for minutes during any long Claude think):
 
 ```bash
 PLUGIN_DIR="$HOME/.claude/plugins/cache/claude-plugins-official/telegram/0.0.4"
 cp "$PLUGIN_DIR/server.ts" "$PLUGIN_DIR/server.ts.orig"
-patch -d "$PLUGIN_DIR" -p0 < patches/telegram-typing-indicator.patch
+patch -d "$PLUGIN_DIR" -p1 < patches/telegram-typing-indicator.patch
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for what the patch
-actually does and why upstream's one-shot call isn't enough.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the mechanics of the
+patch and why upstream's one-shot call isn't enough.
 
-**5. Set up access control**
+---
 
-Inside Claude (any session):
-```
-/telegram:access policy allowlist
-```
-
-DM your bot from Telegram once to get a pairing code, then:
-```
-/telegram:access pair <6-char-code>
-```
-
-From now on only your own Telegram user ID is allowed to talk to the bot.
-See [`docs/SECURITY.md`](docs/SECURITY.md) for why this matters, especially
-if you're using `--dangerously-skip-permissions`.
-
-**6. First launch — press Enter once for folder trust**
+## Create your first container
 
 ```bash
-clbg start      # creates the tmux session
-clbg attach     # enter it, press "Yes, I trust this folder"
-# Then: Ctrl+B D to detach (tmux prefix + D)
+clbg new main --notes "personal assistant"
 ```
 
-**7. Test it**
+The command:
+1. Creates `~/.claude-bg/main/` (the container's cwd)
+2. Creates `~/.claude/channels/telegram-main/` with a template `.env` and
+   `access.json` (allowlist mode by default)
+3. Pre-seeds `~/.claude.json` so Claude Code never prompts for folder trust
+   or project onboarding in this cwd
+4. Prints next-step instructions
 
-DM your bot. You should see:
-- A 👀 reaction appear on your message (the `ackReaction`, configurable)
-- A persistent `typing…` indicator in the chat header until Claude replies
-- The reply
+Then:
+```bash
+# Create a bot with @BotFather, copy its token, then:
+clbg link main 123456789:AAH...
 
-If you don't, jump to [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+# Bootstrap the allowlist (this adds your Telegram user ID)
+clbg exec main /telegram:access policy pairing
+# DM your bot from Telegram to get a pairing code
+clbg exec main /telegram:access pair <code>
+clbg exec main /telegram:access policy allowlist
+
+# Start the background session
+clbg start main
+# (attaches to new tmux; press Ctrl+B D to detach)
+```
+
+Test by DMing your bot. You should see:
+- A 👀 reaction on your message within a second or two (ack)
+- "typing…" in the chat header, held until Claude's reply arrives
+- Claude's reply
+
+If any of those fail, see [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ---
 
 ## Running multiple independent sessions
 
-One bot token = one poller. If you want a "work" session and a "personal"
-session both reachable at the same time, you need **separate bots with
-separate state directories**. This is officially supported by the plugin
-(via the `TELEGRAM_STATE_DIR` env var), just not documented in one place.
+Just do it again with a different label:
 
-Full walkthrough: [`docs/MULTI-BOT.md`](docs/MULTI-BOT.md).
-
-Quick version:
 ```bash
-# Create a second bot via BotFather, get a second token
-
-# Dedicate a state dir for it
-mkdir -p ~/.claude/channels/telegram-work
-echo "TELEGRAM_BOT_TOKEN=<second_token>" > ~/.claude/channels/telegram-work/.env
-chmod 600 ~/.claude/channels/telegram-work/.env
-
-# Launch a second bg session pointed at it
-TELEGRAM_STATE_DIR=~/.claude/channels/telegram-work \
-  clbg start
+clbg new work --notes "business stuff"
+# (second BotFather bot)
+clbg link work 987654321:ZZH...
+clbg exec work /telegram:access policy pairing
+# DM the work bot, get code
+clbg exec work /telegram:access pair <code>
+clbg exec work /telegram:access policy allowlist
+clbg start work
 ```
+
+Each container is fully independent:
+- Separate bot token (no polling race on the Telegram side)
+- Separate cwd (`~/.claude-bg/<label>/`) → separate session history pool
+- Separate tmux session (`claude-bg-<label>`) → start/stop independently
+- Separate allowlist in each `access.json` → different people can be granted
+  access to different bots
+
+See [`docs/MULTI-BOT.md`](docs/MULTI-BOT.md) for the deeper walkthrough and
+failure modes specific to multi-bot setups.
 
 ---
 
-## What you get
+## Command reference
+
+```bash
+clbg new <label> [--notes "..."]       # scaffold a new container
+clbg link <label> <bot-token>          # attach a token, verify it via Telegram getMe
+clbg start <label> [--bg]              # new fresh session (new random UUID)
+clbg resume <label> [--bg]             # --resume <lastSessionId> from ~/.claude.json
+clbg restart <label> [--bg]            # stop + resume
+clbg attach <label>                    # tmux attach
+clbg stop <label>                      # tmux kill-session
+clbg list (ls)                         # fleet overview
+clbg status <label>                    # detailed per-container status
+clbg rm <label> [-y]                   # nuke container (confirmed by typing label)
+clbg exec <label> <prompt>             # one-shot `claude -p` in that container
+```
+
+By default `start`/`resume`/`restart` attach to the tmux session so you see
+any first-run output. Add `--bg` to stay detached if you're scripting.
+
+---
+
+## What's in the box
 
 ```
 claude-telegram-kit/
 ├── scripts/
-│   ├── claude-bg.sh              # the tmux launcher (alias as 'clbg')
-│   └── telegram-new-bot.sh       # scaffolds a new bot's state dir
+│   └── claude-bg.sh                   # clbg — Python 3 container manager (~550 lines)
 ├── skills/
 │   └── telegram-bg-setup/
-│       └── SKILL.md              # invocable skill that walks through the whole setup
+│       └── SKILL.md                   # invocable skill that walks through the whole setup
 ├── patches/
-│   └── telegram-typing-indicator.patch
+│   └── telegram-typing-indicator.patch # 30-min persistent typing indicator
 ├── docs/
-│   ├── ARCHITECTURE.md           # how the pieces fit together
-│   ├── MULTI-BOT.md              # independent sessions with separate bots
-│   ├── TROUBLESHOOTING.md        # every failure mode we hit and how to diagnose it
-│   └── SECURITY.md               # allowlist hygiene, --dangerously-skip-permissions tradeoffs
-├── LICENSE                       # MIT (patch file notes Apache 2.0 for upstream)
-└── README.md                     # this file
+│   ├── ARCHITECTURE.md                # how it all fits together, including ~/.claude.json
+│   ├── MULTI-BOT.md                   # independent sessions with separate bots
+│   ├── TROUBLESHOOTING.md             # every failure mode we hit, with diagnostics
+│   └── SECURITY.md                    # allowlist hygiene, --dangerously-skip-permissions tradeoffs
+├── LICENSE                            # MIT (patch notes Apache 2.0 for upstream derivative work)
+└── README.md                          # this file
 ```
 
 ---
 
-## Not included, on purpose
+## What this kit deliberately doesn't do
 
-- **No bot tokens.** Obvious but worth stating. `.gitignore` excludes `.env`
-  and `access.json`.
-- **No fork of the plugin.** We patch it locally and document the patch.
-  Keeps upgrade paths clean.
-- **No container / systemd unit.** tmux is the right size for a single-user
-  laptop. If you're running this on a server, systemd is a one-off exercise.
-- **No automatic token rotation, no webhook mode.** The Telegram Bot API's
-  long-polling limitation is the entire reason for the multi-bot pattern;
-  working around it belongs in a different project.
+- **No fork of the Telegram plugin.** We patch it locally, document the patch,
+  and document how to re-apply if upstream bumps. Keeps upgrade paths clean.
+- **No single-bot "topic" routing.** Telegram's forum/topic feature is not
+  recognized by the plugin (we checked the source). The plugin pairs 1:1 with
+  a Claude Code process, so "multiple topics in one bot, each mapped to a
+  different cl session" isn't a shape it supports. Multi-bot is the clean
+  alternative.
+- **No systemd / Docker / daemonization.** tmux is right-sized for a single
+  laptop. If you need this on a server, wrap it in systemd yourself —
+  the script doesn't fight you.
+- **No token rotation, no webhook mode.** The long-polling limitation is
+  why multi-bot exists. Working around it belongs in a different project.
 
 ---
 
 ## Contributing
 
 PRs welcome, especially:
-- Additional troubleshooting entries — if you hit a new failure mode, a PR
-  with the error signature and fix is the most valuable contribution
+- New troubleshooting entries — if you hit a failure mode not covered, a PR
+  with the error signature and fix is the most valuable contribution you can make
 - Upstream patch upgrades if the Telegram plugin version bumps
-- Windows/WSL testing (this kit has only been verified on macOS)
+- Linux / WSL testing (this kit has only been verified on macOS)
 
 ---
 
@@ -212,4 +253,4 @@ PRs welcome, especially:
 
 MIT, see [`LICENSE`](LICENSE). The included patch file modifies
 Apache-2.0-licensed upstream code; see the note at the bottom of `LICENSE`
-for the derivative-work implications.
+for derivative-work implications.

@@ -1,236 +1,224 @@
 ---
 name: telegram-bg-setup
-description: Guides the user through setting up Claude Code as a persistent Telegram-backed background assistant via tmux. Use when the user wants to talk to Claude from Telegram, run Claude unattended, or set up multi-session multi-bot configurations. Walks through bot creation, plugin install, flags, folder trust, allowlist, typing patch, and first test.
+description: Guides the user through setting up Claude Code as a persistent Telegram-backed background assistant, using the container model from claude-telegram-kit. One bot per container, multiple containers supported, no stuck one-shot dialogs. Use when the user wants to run Claude unattended from Telegram, add a new bot/container to an existing setup, or diagnose why their existing setup is stuck.
 ---
 
 # telegram-bg-setup
 
-Set up Claude Code to listen on Telegram via the official plugin, running
-persistently in a detached tmux session. This skill guides the user through
-every step needed to get from "nothing" to "I can DM my bot and Claude
-replies even when my terminal is closed".
+Set up Claude Code to listen on Telegram via the official plugin, using the
+`clbg` container model so the session survives detached tmux, multiple
+independent bots work, and no first-run dialog ever blocks.
 
 ## When to use this skill
 
-Trigger this skill when the user says any of:
+Trigger on:
 - "set up claude on telegram", "connect claude to telegram"
 - "run claude in the background so I can message it"
 - "clbg", "claude-bg", "tmux claude setup"
 - "add another bot for a separate session"
-- Equivalent phrases in other languages — the setup steps are
-  language-agnostic.
+- "my bg session is stuck / not responding"
+- Equivalent phrases in other languages
 
-## Before you start — check the environment
+## Before you start — environment sanity check
 
-Run these quick checks and report what's present/missing. Don't assume.
+Run these and report missing pieces. Don't assume.
 
-1. `which claude` — Claude Code installed?
-2. `which bun` — Bun installed? (required by the plugin)
-3. `which tmux` — tmux installed?
-4. `ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ 2>/dev/null` —
-   plugin already installed?
-5. `ls ~/.claude/channels/telegram/.env 2>/dev/null` — token already configured?
-6. `ls ~/.claude-bg/ 2>/dev/null` — bg working directory exists?
-7. `tmux has-session -t claude-bg 2>/dev/null && echo exists` — bg session running?
+```bash
+which claude                                  # Claude Code installed?
+which bun                                     # plugin dep
+which tmux                                    # bg runner dep
+python3 --version                             # clbg is Python 3.9+
+ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ 2>/dev/null
+ls ~/.claude.json 2>/dev/null                 # must exist (claude has been run once)
+```
 
-Based on what's missing, figure out which steps below to run and which to skip.
+Install missing deps before proceeding:
+- Bun: `curl -fsSL https://bun.sh/install | bash`
+- tmux: `brew install tmux` (macOS) or distro package manager
+- Claude Code: https://claude.com/claude-code
 
-## Prerequisites install (only if missing)
+## Step 1 — install claude-telegram-kit
 
-- **Bun**: `curl -fsSL https://bun.sh/install | bash`
-- **tmux**: `brew install tmux` (macOS) or your distro's package manager
-- **Claude Code**: https://claude.com/claude-code
+Check if it's already installed (`which clbg`). If not:
 
-## Step 1 — Create the Telegram bot
+```bash
+git clone https://github.com/intelli-bruce/claude-telegram-kit.git ~/claude-telegram-kit
+ln -s ~/claude-telegram-kit/scripts/claude-bg.sh ~/.local/bin/clbg
+chmod +x ~/.local/bin/clbg
+```
 
-The user must do this interactively in Telegram. Give them exact instructions:
+Verify: `clbg --help` should print the subcommand list.
 
-> Open [@BotFather](https://t.me/BotFather) in Telegram and send `/newbot`.
-> It will ask for:
-> 1. A **name** — shown in chat headers, can contain spaces
-> 2. A **username** — must end in `bot` (e.g. `my_assistant_bot`)
->
-> It will reply with a token that looks like `123456789:AAH...`. Copy the
-> whole thing. Don't paste it to me — you'll paste it into Claude Code
-> directly in the next step.
+## Step 2 — install the Telegram plugin (once per machine)
 
-Wait for the user to confirm they have the token before proceeding.
+If `~/.claude/plugins/cache/claude-plugins-official/telegram/` doesn't exist:
 
-## Step 2 — Install the plugin (skip if already installed)
-
-Tell the user to run these inside a Claude Code session (not a shell):
-
+Tell the user to run these inside a Claude Code session:
 ```
 /plugin install telegram@claude-plugins-official
 /reload-plugins
 ```
+Then `/quit`.
 
-## Step 3 — Configure the token
-
-Still inside Claude Code:
-
-```
-/telegram:configure <the token from BotFather>
-```
-
-This writes `~/.claude/channels/telegram/.env` with mode 0600. Verify with:
-
-```bash
-ls -la ~/.claude/channels/telegram/.env
-# should be -rw------- (owner-only)
-```
-
-If it's not 0600, fix it:
-```bash
-chmod 600 ~/.claude/channels/telegram/.env
-```
-
-## Step 4 — Set up access control (CRITICAL for security)
-
-The bg session will run with `--dangerously-skip-permissions`, which means
-the allowlist is the **only** thing stopping an unauthorized Telegram user
-from executing arbitrary shell commands via the bot. Take this seriously.
-
-Inside any Claude Code session:
-
-```
-/telegram:access policy allowlist
-```
-
-This changes `dmPolicy` from the default `pairing` to `allowlist`. Pairing
-is disabled — only explicitly allowlisted Telegram user IDs can message the
-bot.
-
-**Add the user's own Telegram user ID:**
-
-Option A — pairing (one-time, then disable pairing):
-1. Temporarily set `dmPolicy` back to `pairing`:
-   `/telegram:access policy pairing`
-2. User DMs their bot — the bot replies with a 6-char code
-3. User runs: `/telegram:access pair <code>`
-4. Switch back to allowlist: `/telegram:access policy allowlist`
-
-Option B — manual (if the user already knows their Telegram user ID):
-`/telegram:access allow <user_id>`
-
-Verify:
-```bash
-cat ~/.claude/channels/telegram/access.json
-```
-Expected: `dmPolicy` is `"allowlist"`, `allowFrom` contains the user's ID.
-
-## Step 5 — Install the kit
-
-Find out where the user cloned this repo (ask if unclear). From there:
-
-```bash
-# Create alias — adjust path to wherever the user cloned the kit
-echo "alias clbg='$(realpath scripts/claude-bg.sh)'" >> ~/.zshrc
-source ~/.zshrc   # or open a new terminal
-
-# Create the dedicated working directory
-mkdir -p ~/.claude-bg
-```
-
-The dedicated cwd is important — see `docs/ARCHITECTURE.md` for why.
-Short version: `claude --continue` picks the most-recently-modified session
-jsonl in the cwd's pool, and if that pool contains unrelated sessions from
-other terminals, the bg session will hijack one of them.
-
-## Step 6 — Apply the typing indicator patch (recommended, optional)
-
-Without this patch, the Telegram "typing…" indicator disappears after ~5
-seconds even when Claude is thinking for minutes. The patch refreshes the
-indicator every 4.5s.
+## Step 3 — apply the typing indicator patch (recommended, once per machine)
 
 ```bash
 PLUGIN_DIR="$HOME/.claude/plugins/cache/claude-plugins-official/telegram/0.0.4"
-cp "$PLUGIN_DIR/server.ts" "$PLUGIN_DIR/server.ts.orig"
-patch -d "$PLUGIN_DIR" -p0 < patches/telegram-typing-indicator.patch
-
-# Verify
-grep -n "LOCAL PATCH" "$PLUGIN_DIR/server.ts"
-# should show 3 matches
+if ! grep -q "LOCAL PATCH" "$PLUGIN_DIR/server.ts"; then
+  cp "$PLUGIN_DIR/server.ts" "$PLUGIN_DIR/server.ts.orig"
+  patch -d "$PLUGIN_DIR" -p1 < ~/claude-telegram-kit/patches/telegram-typing-indicator.patch
+  echo "patched"
+else
+  echo "patch already applied"
+fi
 ```
 
-Warn the user: **plugin upgrades will wipe this patch**. They can reapply
-from `server.ts.orig` after upgrades.
+Warn the user that plugin upgrades will wipe this patch. Re-apply from
+`server.ts.orig` after upgrades.
 
-## Step 7 — First launch and folder trust
+## Step 4 — create a container with `clbg new`
+
+Pick a label (alphanumeric + underscore/dash). Ask the user if they don't
+have one in mind. Suggest `main` for the first, `work`/`personal`/`test`
+for subsequent.
 
 ```bash
-clbg start      # create the detached tmux session
-clbg attach     # enter it
+clbg new <label> --notes "<short description>"
 ```
 
-On first launch, Claude Code asks "Is this a project you created or one
-you trust?" for `~/.claude-bg`. Press Enter on "Yes, I trust this folder".
-Then wait a few seconds for the Telegram plugin to load (you'll see
-`~/.claude-bg` in the status bar and the plugin should announce itself
-in the banner).
+This does everything automatically:
+1. Creates `~/.claude-bg/<label>/` (container's cwd)
+2. Creates `~/.claude/channels/telegram-<label>/` with `.env` and `access.json`
+3. Pre-injects trust fields into `~/.claude.json` — **this is the magic
+   that stops all first-run dialogs from ambushing the detached session**
+4. Registers the container in `~/.claude-bg/containers.json`
 
-**Detach cleanly:** `Ctrl+B` then `D`. The session keeps running.
+The command prints the next steps — follow them literally.
 
-## Step 8 — Test
+## Step 5 — create a Telegram bot
 
-Tell the user: "DM your bot anything — say 'hello'. You should see:
-1. A 👀 reaction appear on your message within a second or two
-2. A persistent 'typing…' indicator in the chat header
-3. Claude's reply"
+The user does this interactively. Give them exact instructions:
 
-If any of those three things don't happen, hand off to the
-troubleshooting guide (`docs/TROUBLESHOOTING.md`) — don't try to debug
-from scratch, every failure we've seen is already documented there.
+> Open [@BotFather](https://t.me/BotFather) in Telegram and send `/newbot`.
+>
+> It asks for:
+> 1. A **name** (shown in chat headers, can contain spaces)
+> 2. A **username** ending in `bot` (e.g. `my_assistant_bot`)
+>
+> It replies with a token that looks like `123456789:AAH...`. Paste it into
+> the next command — don't share the whole token with me in chat, put it
+> directly in the `clbg link` call.
 
-## Optional: second bot for a second session
+## Step 6 — link the token
 
-If the user wants multiple independent Claude sessions all reachable from
-Telegram, each session needs its own bot and state directory. Tell the
-user to:
+```bash
+clbg link <label> <token>
+```
 
-1. Create a second bot via BotFather
-2. Run the helper:
-   ```bash
-   scripts/telegram-new-bot.sh work  # creates ~/.claude/channels/telegram-work/
-   ```
-3. Paste the new token into the new `.env` that the script created
-4. Configure access for the new state dir (run Claude with
-   `TELEGRAM_STATE_DIR=~/.claude/channels/telegram-work`, then use
-   `/telegram:access` as in Step 4)
-5. Launch a new bg session pointed at that state dir (see
-   `docs/MULTI-BOT.md` for the tmux command)
+This writes the token to the container's `.env` (0600 permissions) and
+verifies it by calling Telegram's `getMe` — if that succeeds, the bot's
+username is stored in `containers.json` for display in `clbg list`.
 
-Do **not** reuse the same bot token across two Claude Code sessions — the
-Telegram Bot API only allows one `getUpdates` client per token, and the
-two sessions will race each other. Symptoms: messages disappear, replies
-come from the "wrong" Claude, ack reactions land but typing never
-progresses.
+## Step 7 — bootstrap the allowlist (CRITICAL for security)
 
-## Common mid-setup failures to anticipate
+The container's `access.json` starts with an empty `allowFrom`, so the bot
+will reject every message by default. You need to add the user's Telegram
+user ID. The clean way:
 
-- "Plugin installed but `clbg` session doesn't respond to Telegram messages"
-  → Check the MCP logs:
-  `ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg/mcp-logs-plugin-telegram-telegram/*.jsonl | head -1 | xargs tail`
-  Look for `Channel notifications skipped` — means the `--channels` flag
-  wasn't applied. `clbg` should pass it automatically; if you see this,
-  the user probably launched `claude` manually inside the tmux session
-  instead of using the script.
+```bash
+# Temporarily switch to pairing mode
+clbg exec <label> /telegram:access policy pairing
+```
 
-- "`clbg` shows running but first Bash command hangs"
-  → Missing `--dangerously-skip-permissions`. Same cause: wrong launcher.
+Then tell the user: "DM your new bot now. It'll reply with a 6-character
+pairing code. Tell me the code."
 
-- "Claude in bg replies with context from something I never talked about"
-  → Session hijacking via `--continue` from a shared cwd. Check `clbg status`
-  and `tmux capture-pane -t claude-bg:0 -p | grep '~/'` — the status bar
-  should show `~/.claude-bg`, not `~`. If it shows `~`, the user edited the
-  script or is running Claude directly.
+Once they give you the code:
+```bash
+clbg exec <label> /telegram:access pair <code>
+clbg exec <label> /telegram:access policy allowlist
+```
+
+Verify:
+```bash
+cat ~/.claude/channels/telegram-<label>/access.json
+```
+Expected: `dmPolicy: "allowlist"`, `allowFrom` has the user's Telegram ID.
+
+**This is not optional.** The container runs with
+`--dangerously-skip-permissions`, which means every shell command gets
+auto-approved. The allowlist is the only thing stopping an unauthorized
+Telegram user from running arbitrary code. See `docs/SECURITY.md`.
+
+## Step 8 — start the background session
+
+```bash
+clbg start <label>
+```
+
+By default this attaches to the new tmux session so the user can see Claude
+boot and confirm the "Listening for channel messages from: plugin:telegram@claude-plugins-official"
+line. They detach with `Ctrl+B D`.
+
+If you're scripting and don't want to attach, use `--bg`:
+```bash
+clbg start <label> --bg
+```
+
+## Step 9 — test
+
+Ask the user to DM their bot. Tell them to look for:
+1. 👀 reaction on their message (within a second or two)
+2. "typing…" in the chat header, held until reply
+3. The reply
+
+If any are missing, hand off to `docs/TROUBLESHOOTING.md` — don't
+improvise. Every failure mode you're likely to see is already documented.
+
+## Common diagnostic one-liners
+
+Report which containers exist and their status:
+```bash
+clbg list
+```
+
+Deep status for one container (last session id, cost, token usage,
+sessions-index if available):
+```bash
+clbg status <label>
+```
+
+Is the bg session stuck? Check its tmux screen:
+```bash
+tmux capture-pane -t claude-bg-<label>:0 -p | tail -30
+```
+
+Did the plugin actually register with Claude Code? Check the MCP log for
+`Channel notifications registered` (good) or `Channel notifications skipped`
+(bad — flag was missing):
+```bash
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg-<label>/mcp-logs-plugin-telegram-telegram/*.jsonl \
+  | head -1 | xargs tail
+```
+
+Is the bun MCP server actually running and connected to Telegram?
+```bash
+pgrep -f "bun server.ts"
+lsof -a -p $(pgrep -f 'bun server.ts' | head -1) -i | grep 149.154
+```
 
 ## Reporting back
 
-When done, report concisely:
-- Which steps were already done vs newly executed
-- Where the bot token lives (path, not the value)
-- Allowlist contents (just count, not IDs)
+When done, report:
+- Which containers exist (`clbg list` output, redact cost if sensitive)
 - Whether the typing patch was applied
-- The one command to reattach: `clbg attach`
-- The one command to restart if something hangs: `clbg restart`
+- Whether allowlist is populated (count only, not the IDs)
+- The attach command for each container (`clbg attach <label>`)
+- The restart command (`clbg restart <label>`)
+
+Do NOT:
+- Paste bot tokens into chat
+- Paste `access.json` contents with real user IDs
+- Kill existing tmux sessions without confirmation
+- Modify `~/.claude.json` directly — use `clbg new` which does it safely
+  with a backup

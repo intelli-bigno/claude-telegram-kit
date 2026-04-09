@@ -1,224 +1,177 @@
 # Multi-Bot: Running Multiple Independent Sessions
 
-The Telegram Bot API allows only one `getUpdates` long-poll consumer per
-bot token at a time. If you want multiple Claude Code sessions all
-reachable from Telegram simultaneously, each session must have its own bot.
+Run N independent Claude Code sessions, each reachable from its own
+Telegram bot, all on one machine. With `clbg`, this is one command per
+container.
 
-The official plugin supports this via the `TELEGRAM_STATE_DIR` environment
-variable — it's mentioned in one line of the upstream README but never
-explained. This doc is the full walkthrough.
+## Why separate bots instead of one bot with topics?
+
+The Telegram Bot API allows exactly one `getUpdates` long-poll consumer
+per bot token. Two Claude Code sessions polling the same bot produces
+constant 409 Conflict races, with messages arriving at whichever session
+is holding the lock at that moment. Unpredictable and unusable.
+
+We also checked whether the upstream plugin supports Telegram's
+forum/topic feature for routing within a single bot: it doesn't. The
+plugin source contains zero references to `message_thread_id`, and the
+plugin pairs 1:1 with a Claude Code process anyway — one session, one
+context.
+
+**Multi-bot is the clean alternative:** separate bot tokens, separate
+processes, separate contexts, separate polling locks. No races, no
+ambiguity. The tradeoff is that each container shows up as its own chat
+in your Telegram sidebar instead of as sub-threads of a single chat.
 
 ## The mental model
 
 ```
-Session A (work)          Session B (personal)        Session C (test)
-     │                           │                           │
-     ▼                           ▼                           ▼
-@work_assistant_bot      @personal_claude_bot       @claude_test_bot
-(token A)                (token B)                  (token C)
-     │                           │                           │
-     ▼                           ▼                           ▼
-~/.claude/channels/      ~/.claude/channels/         ~/.claude/channels/
-  telegram-work/           telegram-personal/          telegram-test/
-  ├── .env (token A)       ├── .env (token B)         ├── .env (token C)
-  ├── access.json          ├── access.json            ├── access.json
-  └── approved/            └── approved/              └── approved/
+Your machine
+├── Container: main          Container: work          Container: personal
+├── Bot:       @main_bot     @work_bot                @personal_bot
+├── Token:     token_A       token_B                  token_C
+├── State:     ~/.claude/channels/telegram/ or telegram-<label>/
+├── cwd:       ~/.claude-bg/<label>/
+├── tmux:      claude-bg-<label>
+└── cl session: one at a time, independent history pool per cwd
 ```
 
-Three bots, three state dirs, three Claude Code sessions. Each session
-talks to exactly one bot, each bot has exactly one session polling it.
-No races.
+## Creating containers
 
-## Step 1 — Create additional bots in BotFather
-
-DM [@BotFather](https://t.me/BotFather) and repeat `/newbot` for each
-session you want. You'll end up with a token per bot. Name them
-distinctly so you can tell which chat window goes to which Claude session
-(e.g. `@me_work_bot`, `@me_personal_bot`).
-
-## Step 2 — Scaffold a state dir
-
-Use the helper script:
+### First container — usually called `main`
 
 ```bash
-scripts/telegram-new-bot.sh work
-# Creates ~/.claude/channels/telegram-work/ with:
-#   .env           (TELEGRAM_BOT_TOKEN= placeholder)
-#   access.json    (dmPolicy: allowlist, allowFrom: [], ackReaction: 👀)
-#   approved/      (empty dir for pairing ACKs)
+clbg new main --notes "personal assistant"
+# Create @main_bot with BotFather, copy token
+clbg link main 123456789:AAH...
+# Bootstrap allowlist
+clbg exec main /telegram:access policy pairing
+# DM @main_bot → get pairing code
+clbg exec main /telegram:access pair <code>
+clbg exec main /telegram:access policy allowlist
+# Start
+clbg start main
 ```
 
-Paste the token for the "work" bot into `.env`:
+### Additional containers — one command per new bot
 
 ```bash
-echo 'TELEGRAM_BOT_TOKEN=<paste work bot token here>' > ~/.claude/channels/telegram-work/.env
-chmod 600 ~/.claude/channels/telegram-work/.env
+clbg new work --notes "business"
+# Create @work_bot with BotFather (completely separate bot!)
+clbg link work 987654321:BBH...
+# Allowlist bootstrap (note: each container has its own allowlist)
+clbg exec work /telegram:access policy pairing
+# DM @work_bot → new pairing code
+clbg exec work /telegram:access pair <code>
+clbg exec work /telegram:access policy allowlist
+clbg start work
 ```
 
-Repeat for each additional bot (`telegram-personal`, `telegram-test`, etc.).
+Repeat for each additional bot. Each container is fully isolated:
 
-## Step 3 — Bootstrap access for the new state dir
+- Separate bot token → no polling race
+- Separate `~/.claude-bg/<label>/` cwd → isolated session pool
+- Separate `~/.claude/channels/telegram-<label>/` → isolated allowlist
+- Separate `claude-bg-<label>` tmux session → start/stop independently
 
-The new `access.json` has an empty `allowFrom`, so the bot will reject
-every incoming message. You need to add your Telegram user ID.
+## Managing the fleet
 
-The cleanest way is to temporarily flip to pairing mode, DM the new bot
-to get a pairing code, then flip back to allowlist:
+List all containers with `clbg list`:
+
+```
+LABEL     BOT              STATUS    LAST SESSION  COST    TOKENS  NOTES
+main      @main_bot        running   c37f19ee…    $12.40  8.2M    personal assistant
+work      @work_bot        running   d48ab503…    $21.53  22.2M   business stuff
+personal  @personal_bot    stopped   -             -       -      side projects
+```
+
+Deep status for one:
 
 ```bash
-# Start a short-lived Claude session pointed at the new state dir
-TELEGRAM_STATE_DIR=~/.claude/channels/telegram-work \
-  claude --channels plugin:telegram@claude-plugins-official
+clbg status main
 ```
 
-Inside that session:
+Shows lastSessionId, cost, token breakdown, plus the last few entries from
+sessions-index.json (firstPrompt + summary) if it exists.
 
-```
-/telegram:access policy pairing
-```
-
-Now DM the new bot from Telegram. It will reply with a 6-char code. Back
-in the Claude session:
-
-```
-/telegram:access pair <code>
-/telegram:access policy allowlist
-```
-
-Verify:
+Restart one without touching the others:
 
 ```bash
-cat ~/.claude/channels/telegram-work/access.json
-# dmPolicy should be "allowlist"
-# allowFrom should contain your Telegram user ID
+clbg restart work
 ```
 
-Exit that Claude session (`Ctrl+D` or `/quit`).
-
-## Step 4 — Launch each session as its own tmux background runner
-
-The included `clbg` script uses a hard-coded tmux session name
-(`claude-bg`) and the default state dir, so you need a tiny wrapper per
-bot to avoid collisions. The simplest form:
+Stop one:
 
 ```bash
-cat > ~/.local/bin/clbg-work <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-work"
-SESSION=claude-bg-work
-CLAUDE_BIN="$HOME/.claude/local/claude"
-WORK_DIR="$HOME/.claude-bg-work"
-CLAUDE_ARGS="--channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions"
-mkdir -p "$WORK_DIR"
-
-case "${1:-attach-or-start}" in
-  start)
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
-      echo "already running"
-    else
-      tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "$CLAUDE_BIN $CLAUDE_ARGS"
-      echo "started"
-    fi ;;
-  attach)  tmux attach -t "$SESSION" ;;
-  stop)    tmux kill-session -t "$SESSION" 2>/dev/null || true ;;
-  restart)
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
-    sleep 1
-    tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "$CLAUDE_BIN --continue $CLAUDE_ARGS" ;;
-  status)
-    tmux has-session -t "$SESSION" 2>/dev/null && echo "running" || echo "stopped" ;;
-  *) echo "usage: $0 [start|attach|stop|restart|status]"; exit 1 ;;
-esac
-EOF
-chmod +x ~/.local/bin/clbg-work
+clbg stop personal
 ```
 
-Key differences from the stock `clbg`:
-- `TELEGRAM_STATE_DIR` export tells the plugin to read `.env` and `access.json`
-  from the work directory instead of the default
-- `SESSION=claude-bg-work` — a distinct tmux session name per bot, so they
-  don't collide
-- `WORK_DIR="$HOME/.claude-bg-work"` — a distinct cwd per bot, so the
-  `--continue` session pool is also isolated
-
-Duplicate the script for each bot (`clbg-personal`, `clbg-test`, ...)
-and adjust the paths.
-
-## Step 5 — First launch for each
-
-For each new runner, the first time you start it, Claude Code will ask
-for folder trust on the new cwd. You have to attach once and press Enter.
+Remove one permanently (prompts for confirmation by having you type the
+label):
 
 ```bash
-clbg-work start
-clbg-work attach
-# "Yes, I trust this folder" → Enter
-# Wait for plugin to load (watch for the status bar to show ~/.claude-bg-work)
-# Ctrl+B D to detach
+clbg rm personal
 ```
 
-Repeat for each bot. Each session now has its own:
-- Working directory (`~/.claude-bg-work`, `~/.claude-bg-personal`, ...)
-- Session jsonl pool (`~/.claude/projects/-Users-<you>--claude-bg-work/`, ...)
-- Telegram state (`~/.claude/channels/telegram-work/`, ...)
-- tmux session (`claude-bg-work`, ...)
-- Bot (`@me_work_bot`, ...)
+## Verifying there's no polling race
 
-## Step 6 — Verify no polling races
-
-You should now see one bun child process per active session, each with
-connections to Telegram's API:
+After starting multiple containers:
 
 ```bash
 ps aux | grep "bun server.ts" | grep -v grep
-# expected: one line per running session
-
-lsof -a -p <each pid> -i -P 2>/dev/null | grep "149.154"
-# expected: each pid has its own ESTABLISHED connections, different from the others
+# Expect: one line per running container
 ```
 
-If two sessions point at the same `TELEGRAM_STATE_DIR`, you're back to
-the racing problem. Double-check by running:
+Each bun process has its own Telegram API connections:
 
 ```bash
-ps eww $(pgrep -f "bun server.ts")
-# look for TELEGRAM_STATE_DIR=... in the env dump
+for pid in $(pgrep -f "bun server.ts"); do
+  echo "=== $pid ==="
+  lsof -a -p $pid -i -P 2>/dev/null | grep 149.154
+done
+# Expect: each pid has its own ESTABLISHED connections
 ```
 
-If any two processes have the same state dir, kill one and fix its
-launcher.
+If any two processes are reading from the **same** state dir, you've got a
+misconfiguration:
+
+```bash
+ps eww $(pgrep -f "bun server.ts") | grep TELEGRAM_STATE_DIR
+```
+
+Each line should show a different `TELEGRAM_STATE_DIR=...`. If two match,
+one of the containers is misconfigured — check `~/.claude-bg/containers.json`.
 
 ## Gotchas
 
-- **Do not share `~/.claude-bg/` across runners.** The whole point of
-  per-session cwds is isolation. Use `~/.claude-bg-<label>/`.
-- **Do not share access.json across bots.** Each bot has its own
-  allowlist. A Telegram user ID that's allowed on the work bot is not
-  automatically allowed on the personal bot.
+- **Don't share bot tokens across containers.** That's the exact polling
+  race we're trying to avoid. Each container needs its own bot from
+  BotFather.
+- **Each container has its own allowlist.** A Telegram user ID that's
+  allowed on the main bot is not automatically allowed on the work bot.
+  You have to bootstrap each one (Step 7 in the single-bot setup, run per
+  container).
 - **Apply the typing patch once, globally.** The patch lives in the
-  plugin's `server.ts`, which is shared across all sessions, so you only
-  apply it once and every bg runner benefits.
-- **Plugin updates invalidate the patch for everyone.** Keep
+  plugin's `server.ts`, which is shared across all containers, so you
+  only apply it once and every bg runner benefits.
+- **Plugin upgrades invalidate the patch for everyone.** Keep
   `server.ts.orig` around and script the re-application if you upgrade
-  frequently.
-- **One bot, one laptop, one session at a time.** If you launch the same
-  bot's runner on two machines (or in a tmux session and interactively in
-  a terminal), they race — the per-state-dir isolation only prevents
-  races *within* a machine when each session has its own state dir.
+  frequently. A PR that automates this is welcome.
+- **One container per bot, and the bot follows the container.** If you
+  want to move a bot to a different container, use `clbg link` to update
+  the token in the target, then clear the old container's `.env`.
 
 ## When multi-bot is overkill
 
-If you rarely need more than one concurrent Telegram channel, don't
-bother. Run the stock `clbg` and accept that any other Claude session
-with the plugin loaded will race against it. The single-bot setup is
-much simpler and covers 90% of use cases — most people just want "my
-Claude, reachable from my phone".
+If you only need one always-on Telegram channel, just run one container
+(`main`) and stop. The single-bot case is still a full `clbg new` + `link`
++ `start` workflow — it's just one. Nothing about `clbg` penalizes you
+for using only one container.
 
-Multi-bot shines when:
-- You want separate conversation histories for work and personal contexts
-- You need to isolate test/experimental sessions from a production-ish one
-- You're running a shared machine where different people need their own
-  Claude
-- You want to run Claude in a PR review context that shouldn't see your
-  personal history
+Multi-bot pays off when you need:
+
+- Separate conversation histories for work and personal
+- A test/experimental channel isolated from a production-ish one
+- Different allowlists (e.g. sharing a work bot with a colleague without
+  exposing your personal main bot)
+- A PR review or code-review bot scoped to one repo, isolated from the
+  rest of your dev environment

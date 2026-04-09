@@ -4,29 +4,23 @@ Every failure mode we hit while building this kit, with the symptoms you
 see from Telegram and the diagnostic commands that confirm the cause.
 
 If you hit something not covered here, please open an issue with the
-error signature — PRs adding entries are the most useful contribution.
+error signature — PRs adding entries are the most valuable contribution.
 
 ---
 
 ## 1. MCP is running but messages are silently dropped
 
 **Symptom.** You DM the bot, nothing happens. No reaction, no reply, no
-"typing…". The plugin's bun process is running (you can see it in
-`ps aux`). Network connections to `api.telegram.org` are established.
-Everything *looks* fine.
+"typing…". The plugin's bun process is running (you see it in `ps aux`).
+Network connections to `api.telegram.org` are established. Everything
+*looks* fine.
 
-**Diagnosis.** Check the MCP log for the session in question:
+**Diagnosis.**
 
 ```bash
-# bg session (if you're using clbg)
-ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg/mcp-logs-plugin-telegram-telegram/*.jsonl \
-  | head -1 \
-  | xargs tail -3
-
-# default $HOME session
-ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*/mcp-logs-plugin-telegram-telegram/*.jsonl \
-  | head -1 \
-  | xargs tail -3
+# bg container (if you're using clbg)
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg-<label>/mcp-logs-plugin-telegram-telegram/*.jsonl \
+  | head -1 | xargs tail -3
 ```
 
 Look for this line:
@@ -39,28 +33,23 @@ If you see `registered` instead of `skipped`, this isn't your problem —
 skip to the next section.
 
 **Cause.** The Claude Code session was launched without the `--channels`
-flag. The plugin starts normally, the MCP server starts normally, and the
-bun process polls Telegram normally. But when the server calls
+flag. The plugin starts normally, polls Telegram normally, receives
+messages normally. But when the server calls
 `mcp.notification({ method: 'notifications/claude/channel', ... })`,
-Claude Code checks its internal subscription list, doesn't find the
-plugin, and silently discards the notification.
+Claude Code checks its subscription list, doesn't find the plugin, and
+discards the notification.
 
-**Fix.** Always launch Claude Code with:
-
-```
-claude --channels plugin:telegram@claude-plugins-official
-```
-
-`clbg` bakes this in. If you launched `claude` manually inside the tmux
-session instead of using `clbg start`, this is why.
+**Fix.** `clbg` always passes `--channels` — if you see this, you're
+launching `claude` manually inside the tmux session instead of via
+`clbg start`. Use the script.
 
 ---
 
 ## 2. Background session freezes on a permission prompt
 
-**Symptom.** The bg session answered the first one or two Telegram
-messages fine, then stopped. Subsequent messages get the ack reaction
-(👀) but no reply. `clbg attach` shows Claude is stuck on a dialog:
+**Symptom.** The bg session answered a few Telegram messages fine, then
+stopped. Subsequent messages get the 👀 ack but no reply.
+`clbg attach <label>` shows Claude stuck on:
 
 ```
 Do you want to proceed?
@@ -70,337 +59,305 @@ Do you want to proceed?
 ```
 
 **Diagnosis.**
-
 ```bash
-tmux capture-pane -t claude-bg:0 -p | tail -20
+tmux capture-pane -t claude-bg-<label>:0 -p | tail -20
 ```
 
-If you see that dialog, this is it. The MCP log will show incoming
-messages stacking up with no corresponding `reply` tool call:
-
+MCP log shows messages stacking with no corresponding `reply` tool call:
 ```
 "notifications/claude/channel: <message>"
-"notifications/claude/channel: <next message>"
-"notifications/claude/channel: <another>"
-# ...no "Calling MCP tool: reply" in between
+"notifications/claude/channel: <next>"
+# ...no "Calling MCP tool: reply" between them
 ```
 
-**Cause.** Claude wanted to run a shell command that wasn't on its
-permission allowlist, so it's waiting for interactive approval. In a
-detached tmux session, nothing is pressing 1.
+**Cause.** Claude wanted to run a shell command not on its permission
+allowlist, so it's waiting for interactive approval. Nothing presses 1 in
+a detached session.
 
-**Fix (short-term).** Reattach and press 1 (or preferably 2 for
-"don't ask again") — the backlog of messages starts processing.
+**Fix (immediate).** `clbg attach <label>`, press 2 ("don't ask again
+for ..."), detach with `Ctrl+B D`. Backlog starts processing.
 
-**Fix (correct).** Launch with `--dangerously-skip-permissions` so
-every tool call auto-approves. This is what `clbg` does. See
-[`SECURITY.md`](SECURITY.md) for why this is safe when you have a
-strict allowlist, and dangerous when you don't.
+**Fix (correct).** `clbg start` / `resume` / `restart` already include
+`--dangerously-skip-permissions`, so this shouldn't happen. If it does,
+you're either running claude manually without the flag, or something in
+the environment is overriding it — check `clbg status <label>` to confirm
+the tmux session is what you think it is.
 
 ---
 
 ## 3. Background session "continues" a conversation that was never about Telegram
 
-**Symptom.** You restart the bg session with `clbg restart`. You DM
-the bot, and Claude's reply references code, files, or project names
-you haven't mentioned all day. It feels like you're talking to someone
-else's Claude.
+**Symptom.** You restart a container. You DM the bot. Claude's reply
+references code, files, or project names you haven't mentioned all day.
+Feels like you're talking to someone else's Claude.
 
 **Diagnosis.**
-
 ```bash
-tmux capture-pane -t claude-bg:0 -p | grep '~/'
+tmux capture-pane -t claude-bg-<label>:0 -p | grep '~/'
 ```
 
 The status bar at the bottom shows the cwd. If it shows `~` (your
-`$HOME`), this is your problem. If it shows `~/.claude-bg`, something
-else is wrong.
+`$HOME`), this is your problem. If it shows `~/.claude-bg/<label>`,
+something else is wrong (keep reading this section for the v2-era
+variant).
 
-Another check — look at the session jsonl the bg is actually using:
+**Cause (v1, pre-container-model).** `claude --continue` picked the
+most-recently-modified session from a shared cwd pool. The pool for
+`$HOME` accumulates every Claude Code session ever launched there, so
+"most recent" was often a completely unrelated session.
 
-```bash
-ls -lat ~/.claude/projects/-Users-*/*.jsonl 2>/dev/null | head -5
-# the most recently modified one is the one bg grabbed via --continue
-```
+**Fix.** This doesn't happen with `clbg` v2 because:
+1. Each container has its own isolated cwd (`~/.claude-bg/<label>/`), so
+   its session pool only contains its own history
+2. `clbg resume` never uses `--continue` — it reads `lastSessionId` from
+   `~/.claude.json` and passes `--resume <uuid>` explicitly
 
-Then dump the first ~20 messages:
-
-```bash
-head -20 <the_file>.jsonl | jq -r '.type, .message.content' 2>/dev/null
-```
-
-If those messages have nothing to do with Telegram or your current
-context, that confirms the hijack.
-
-**Cause.** `claude --continue` picks the most-recently-modified
-`*.jsonl` in the cwd's session pool. The pool for `$HOME` is
-`~/.claude/projects/-Users-<you>/`, which accumulates every Claude Code
-session ever launched from `$HOME` (cron jobs, other terminals, IDE
-sessions, random one-off questions, etc.). When `clbg restart` fires,
-whichever session was modified most recently — including a completely
-unrelated one — gets resumed.
-
-We hit this exactly: a restart grabbed a session about "analyze the
-global claude code config" and started answering Telegram messages with
-that session's context.
-
-**Fix.** Launch the bg session with a dedicated cwd that nothing else
-uses:
-
-```bash
-mkdir -p ~/.claude-bg
-# clbg sets WORK_DIR=~/.claude-bg by default — verify:
-grep WORK_DIR scripts/claude-bg.sh
-```
-
-The isolated pool `~/.claude/projects/-Users-<you>--claude-bg/` will
-only ever contain the bg session's own history, so `--continue` can't
-get it wrong.
-
-After applying the fix, **the next `clbg start` will be a fresh
-session** — the old hijacked one lives in the other pool and can be
-ignored or deleted.
+If you're somehow still hitting this with `clbg`, check that
+`clbg status <label>` shows the expected cwd and last session ID. If the
+lastSessionId looks wrong, it was written by something else — another
+Claude Code process sharing the same cwd (shouldn't happen unless you've
+manually pointed two containers at the same directory).
 
 ---
 
 ## 4. First launch hangs on "Yes, I trust this folder?"
 
-**Symptom.** You run `clbg start`, `clbg attach`, and see:
-
+**Symptom.** First time you `clbg start <label>` a container, you see:
 ```
-Accessing workspace: /Users/<you>/.claude-bg
 Quick safety check: Is this a project you created or one you trust?
 ❯ 1. Yes, I trust this folder
   2. No, exit
 ```
 
-**Cause.** Claude Code asks for folder trust once per directory. The
-first time you launch it from a new cwd, you have to press Enter on
-"Yes". `--dangerously-skip-permissions` doesn't bypass this particular
-prompt — it's about workspace trust, not tool permissions, and the
-two are intentionally separate.
+**Cause.** Something prevented `clbg new` from pre-injecting the trust
+fields into `~/.claude.json`. This shouldn't happen in v2 — `clbg new`
+writes `hasTrustDialogAccepted: true`, `hasTrustDialogHooksAccepted: true`,
+and `hasCompletedProjectOnboarding: true` before the session ever starts.
 
-**Fix.** Press Enter on "Yes, I trust this folder", wait a few seconds
-for the plugins to load, then detach with `Ctrl+B D`. You only ever do
-this once per cwd — the trust is remembered across restarts.
+**Diagnosis.**
+```bash
+python3 -c "
+import json
+d = json.load(open('$HOME/.claude.json'))
+cwd = '$HOME/.claude-bg/<label>'  # replace <label>
+p = d['projects'].get(cwd, {})
+for k in ['hasTrustDialogAccepted','hasTrustDialogHooksAccepted','hasCompletedProjectOnboarding']:
+    print(f'{k}: {p.get(k)}')
+"
+```
 
-If you're getting re-prompted every restart, Claude Code's trust cache
-may be broken. Check `~/Library/Application Support/claude-code/` (or
-your platform's equivalent) for a trust-related file, but usually this
-is a one-and-done thing.
+If any field is missing or false, `clbg new` didn't complete properly
+(maybe an error you didn't notice, or you created the container manually).
+
+**Fix.** Attach once and press Enter — Claude Code will flip the field to
+true itself. Then detach and it'll stay fixed. Alternative: remove and
+re-create the container:
+```bash
+clbg stop <label>
+clbg rm <label> -y
+clbg new <label>
+clbg link <label> <token>
+clbg start <label>
+```
 
 ---
 
-## 5. Typing indicator disappears after 5 seconds
+## 5. Typing indicator disappears mid-think
 
-**Symptom.** You DM the bot. The 👀 reaction appears, "typing…" briefly
-shows in the chat header, then disappears. Claude is still working in
-the background; 30 seconds later the reply lands. You spent those 30
-seconds wondering if Claude crashed.
+**Symptom.** You DM the bot. 👀 appears. "typing…" briefly shows in the
+chat header, then disappears. Claude is still working; 30+ seconds later
+the reply lands. You spent those seconds wondering if Claude crashed.
 
-**Cause.** Telegram's `sendChatAction('typing')` only persists ~5
-seconds. The upstream plugin calls it exactly once on message receipt
-and never again. Anything that takes longer than 5 seconds to answer
-looks dead.
+**Cause.** Telegram's `sendChatAction('typing')` only persists ~5 seconds.
+The upstream plugin calls it exactly once on message receipt.
 
 **Fix.** Apply `patches/telegram-typing-indicator.patch`. It adds a
 4.5-second refresh loop that keeps the indicator alive until `reply` is
-called (with a 30-minute hard cap as a safety net — we originally
-tried 5 minutes and it was too aggressive for long-running thinks).
+sent (30-minute hard cap as a runaway guard — we originally tried 5
+minutes and it was way too aggressive for long-running thinks).
 
 ```bash
 PLUGIN_DIR="$HOME/.claude/plugins/cache/claude-plugins-official/telegram/0.0.4"
 cp "$PLUGIN_DIR/server.ts" "$PLUGIN_DIR/server.ts.orig"
-patch -d "$PLUGIN_DIR" -p0 < patches/telegram-typing-indicator.patch
+patch -d "$PLUGIN_DIR" -p1 < patches/telegram-typing-indicator.patch
+clbg restart <label>  # reload patched bun
 ```
 
-Restart the bg session (`clbg restart`) so the bun process reloads the
-patched `server.ts`.
-
-**Verification.** DM the bot a question that takes >10 seconds to
-answer. The chat header should show "typing…" continuously until the
-reply arrives.
+**Verification.** DM the bot a question that takes >10 seconds to answer.
+The chat header should show "typing…" continuously until the reply
+arrives.
 
 ---
 
-## 6. Two Claude sessions fighting over the same bot
+## 6. Multiple containers fighting over the same bot
 
 **Symptom.** Messages get ack'd (👀 appears) but replies come back
-randomly, or not at all, or the reply references context from a
-different conversation. You're running two `claude` sessions on the
-same machine, both with the Telegram plugin loaded.
+randomly, or not at all, or reference context from a different
+conversation. Multiple `clbg` containers are listed as running.
 
 **Diagnosis.**
-
 ```bash
 ps aux | grep "bun server.ts" | grep -v grep
-# if you see more than one, this is your problem
+# If more bun processes than running containers, something's off
+
+# Check each bun's TELEGRAM_STATE_DIR
+ps eww $(pgrep -f "bun server.ts") | grep -o "TELEGRAM_STATE_DIR=[^ ]*" | sort | uniq -c
+# Expected: each state dir used by exactly one bun
 ```
 
-Confirm both are connected to Telegram:
+If two bun processes share the same `TELEGRAM_STATE_DIR`, they're racing
+on the same bot token. That's a misconfiguration — probably you manually
+edited `containers.json` or reused a state dir across containers.
 
+**Fix (immediate).** Kill the extras:
 ```bash
-for pid in $(pgrep -f "bun server.ts"); do
-  echo "=== $pid ==="
-  lsof -a -p $pid -i -P 2>/dev/null | grep "149.154"
-done
+# Identify the one you want to keep (say, 99516):
+kill -TERM <other pids>
 ```
 
-Check each session's MCP log for retries:
-
-```bash
-grep "409 Conflict" ~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-telegram-telegram/*.jsonl 2>/dev/null
-```
-
-If you see 409 messages, those are the losers in the polling race.
-
-**Cause.** The Telegram Bot API only allows one `getUpdates` long-poll
-client per bot token. Two clients means they trade the lock back and
-forth unpredictably. Messages arrive at whichever is holding the lock
-at that moment.
-
-**Fix — short term.** Kill all but one of the bun processes:
-
-```bash
-# identify the one you want to keep (probably the clbg session)
-# kill the others:
-kill -TERM <pid>
-```
-
-Claude Code may respawn the killed one. If it does, you need to exit
-the offending Claude Code session entirely, or launch it without the
-plugin's channel registration (drop the `--channels` flag from that
-session — the plugin will still start but won't actively compete on
-the polling lock... no, actually it still polls regardless).
-
-**Fix — correct.** Run the "other" session with its own bot via
-`TELEGRAM_STATE_DIR`. See [`MULTI-BOT.md`](MULTI-BOT.md). This is the
-only way to have two reliable Claude-on-Telegram sessions on one
-machine.
+**Fix (correct).** Make sure each container in `~/.claude-bg/containers.json`
+has a unique `stateDir`. The default `clbg new <label>` creates
+`~/.claude/channels/telegram-<label>/`, which is unique by label.
 
 ---
 
 ## 7. ACK reaction appears but Claude never replies
 
-**Symptom.** Every message gets the 👀 reaction — so the server is
-clearly receiving and acking. But no reply ever comes, even after
-minutes.
+**Symptom.** Every message gets 👀. No reply, even after minutes. Typing
+indicator doesn't persist.
 
 **Diagnosis.** This is almost always one of:
 
-- Cause #1 (skipped channel registration): check the MCP log for
+- Cause #1 (channel registration skipped): check the MCP log for
   `Channel notifications skipped`
-- Cause #2 (permission prompt): `tmux capture-pane -t claude-bg:0 -p`
-- Cause #6 (polling race): the *other* session is the one Claude Code
-  is listening on
+- Cause #2 (permission prompt): `tmux capture-pane`
+- Cause #6 (polling race): the *other* session is holding the lock
 
-To tell which, check whether the message made it to Claude by reading
-the MCP log for the target session:
-
+Check MCP log for the target container:
 ```bash
-ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg/mcp-logs-plugin-telegram-telegram/*.jsonl \
-  | head -1 \
-  | xargs tail
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg-<label>/mcp-logs-plugin-telegram-telegram/*.jsonl \
+  | head -1 | xargs tail
 ```
 
-- No `notifications/claude/channel: <your message>` → the message
-  never reached this session (cause #6 — it went to another session
-  that's polling the same bot)
+- No `notifications/claude/channel: <your message>` → message never
+  reached this session (cause #6 — it went to another polling bun)
 - Has the notification but no subsequent `Calling MCP tool: reply` →
   Claude received it but can't respond (cause #2 — stuck on permission
-  prompt) or is still thinking
+  prompt, or still thinking)
 
 ---
 
-## 8. Folder trust re-prompted after `clbg restart`
+## 8. `clbg resume` complains about a missing jsonl
 
-**Symptom.** You pressed Enter on "Yes, I trust this folder" during the
-initial setup, detached, everything worked. Later you run
-`clbg restart` and it asks again.
+**Symptom.**
+```bash
+$ clbg resume main
+[clbg] last session abc123 jsonl missing — starting fresh instead
+```
 
-**Cause.** If `clbg restart` kills the session ungracefully, Claude
-Code may not get a chance to persist its trust state. Or you're using
-`--continue` against a session pool that was created before the trust
-was saved.
+**Cause.** `~/.claude.json` projects entry has a `lastSessionId` that no
+longer has a jsonl file on disk. Usually because the jsonl was manually
+moved, archived, or Claude Code cleaned it up.
 
-**Fix.** Press Enter again. It should only happen once more. If it
-keeps happening on every restart, something is actively clearing the
-trust cache — worth investigating but extremely rare.
+**Fix.** None needed — `clbg resume` automatically falls back to
+`clbg start` (fresh session) when the jsonl is missing. This is the
+intended safety net.
+
+If you didn't want a fresh start, check `/tmp/claude-bg-archive/` or
+wherever you might have moved the jsonl, and restore it:
+```bash
+mv /tmp/claude-bg-archive/<uuid>.jsonl ~/.claude/projects/-Users-*--claude-bg-<label>/
+clbg resume <label>
+```
 
 ---
 
-## 9. "Channel notifications registered" in logs but messages still not arriving
+## 9. "Resume from summary vs full" prompt fires on restart
 
-**Symptom.** The MCP log clearly shows:
+**Symptom.** `clbg restart <label>` attaches and you see:
+```
+This session is 7h 40m old and 284k tokens.
+Resuming the full session will consume a substantial portion of your usage limits.
+We recommend resuming from a summary.
 
-```json
-{"debug":"Channel notifications registered","sessionId":"..."}
+❯ 1. Resume from summary (recommended)
+  2. Resume full session as-is
+  3. Don't ask me again
 ```
 
-And yet DMs to the bot produce nothing — no ack, no reply.
+**Cause.** This prompt only fires when `claude --continue` is used
+against a large old session. `clbg` v2 **should never hit this** because
+it uses `--resume <exact UUID>`, not `--continue`.
 
-**Diagnosis.** Check if any `notifications/claude/channel:` entries
-appear in that log file:
+If you see this, you're probably running `claude --continue` manually
+inside the tmux session, or your `clbg` is somehow falling through to
+`--continue`.
 
-```bash
-grep "notifications/claude/channel:" <log_file>
+**Fix (immediate).** Select "1. Resume from summary" and the session
+continues. Or select "3. Don't ask me again" to permanently dismiss for
+this session in the future.
+
+**Fix (correct).** Use `clbg` commands, not raw `claude`. Check your
+shell history — `clbg restart <label>` should be the last command you
+ran, not `claude --continue`.
+
+---
+
+## 10. Idle warning: "You've been away 2h..."
+
+**Symptom.** Attaching to a bg session, you see:
+```
+You've been away 2h and this conversation is 28k tokens.
+If this is a new task, clearing context will save usage and be faster.
+
+❯ 1. Continue this conversation
+  2. Send message as a new conversation
+  3. Don't ask me again
 ```
 
-If the file has `Channel notifications registered` but zero
-`notifications/claude/channel:` entries, the plugin isn't receiving
-messages at all. Check:
+**Cause.** Claude Code's idle warning — triggers after N minutes away with
+a non-trivial session. This is a UI affordance, not an error.
 
-```bash
-# Is the bot token correct?
-cat ~/.claude/channels/telegram/.env
-
-# Is the polling process alive?
-ps aux | grep "bun server.ts" | grep -v grep
-
-# Is it connected to Telegram?
-lsof -a -p <bun_pid> -i -P | grep "149.154"
-
-# Check stderr output — telegram channel errors land there
-# (Claude Code captures stderr into the MCP log, so search the log for telegram channel:)
-grep "telegram channel:" <log_file>
-```
-
-Common issues at this stage:
-- Invalid/revoked bot token → `Unauthorized` error in logs
-- Network issue → no ESTABLISHED connections to `149.154.*`
-- Sender not in `allowFrom` and `dmPolicy` is `allowlist` → message is
-  silently dropped at the gate. Check `access.json` and ensure your
-  Telegram user ID is in `allowFrom`.
+**Fix.** Pick whichever option matches your intent. "Don't ask me again"
+permanently dismisses for this container. The prompt doesn't block
+incoming Telegram messages, but it does block your interactive attach
+until you answer.
 
 ---
 
 ## Diagnostic toolkit (copy-paste)
 
-Quick sanity check:
+Quick sanity check for a container:
 
 ```bash
-# 1. tmux session alive?
-tmux has-session -t claude-bg && echo "tmux OK" || echo "tmux MISSING"
+label=main  # change to yours
 
-# 2. bun process alive?
+# 1. Does the container exist?
+clbg list | grep -w "$label"
+
+# 2. Container details
+clbg status "$label"
+
+# 3. tmux session alive?
+tmux has-session -t "claude-bg-$label" && echo "tmux OK" || echo "tmux MISSING"
+
+# 4. bun process alive?
 pgrep -lf "bun server.ts" || echo "no bun server"
 
-# 3. connected to Telegram?
+# 5. Connected to Telegram?
 for pid in $(pgrep -f "bun server.ts"); do
-  lsof -a -p $pid -i -P 2>/dev/null | grep 149.154 | head -1
+  conn=$(lsof -a -p $pid -i -P 2>/dev/null | grep 149.154 | head -1)
+  echo "$pid: ${conn:-no telegram connection}"
 done
 
-# 4. latest MCP log
-ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg/mcp-logs-plugin-telegram-telegram/*.jsonl 2>/dev/null | head -1
+# 6. Channel registration status for this container
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-*--claude-bg-$label/mcp-logs-plugin-telegram-telegram/*.jsonl 2>/dev/null \
+  | head -1 | xargs grep -H "registered\|skipped" 2>/dev/null
 
-# 5. channel registration status
-grep -l "Channel notifications registered" \
-  ~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-telegram-telegram/*.jsonl 2>/dev/null \
-  | head
+# 7. Current bg screen
+tmux capture-pane -t "claude-bg-$label:0" -p 2>/dev/null | tail -20
 
-# 6. current bg screen
-tmux capture-pane -t claude-bg:0 -p 2>/dev/null | tail -20
-
-# 7. access.json sanity
-jq '.dmPolicy, (.allowFrom | length)' ~/.claude/channels/telegram/access.json
+# 8. Access.json sanity (count only, no IDs)
+state=$(python3 -c "import json; print(json.load(open('$HOME/.claude-bg/containers.json'))['containers']['$label']['stateDir'])")
+jq '{dmPolicy, allowFromCount: (.allowFrom|length)}' "$state/access.json"
 ```
