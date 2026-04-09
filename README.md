@@ -113,6 +113,26 @@ patch and why upstream's one-shot call isn't enough.
 
 ---
 
+## Upgrading (마이그레이션)
+
+이전 버전에서 업그레이드하는 경우, 토큰 격리 방식이 변경되었습니다.
+기존에 `.env`에 `TELEGRAM_BOT_TOKEN=`(빈 값)으로 컨테이너를 생성했다면,
+새 버전에서는 `.env`가 `DISABLED` 상태로 유지되고 실제 토큰은
+`containers.json`에만 저장됩니다.
+
+**기존 컨테이너 마이그레이션 방법:**
+
+```bash
+# 각 컨테이너에 대해 토큰을 다시 link 합니다
+clbg link <label> <token>
+```
+
+`clbg link`를 다시 실행하면 `containers.json`에 토큰이 저장되고,
+이후 `clbg start` 시 자동으로 `.env`에 활성화됩니다.
+별도의 데이터 손실은 없으며, 기존 세션 히스토리와 설정은 그대로 유지됩니다.
+
+---
+
 ## Create your first container
 
 ```bash

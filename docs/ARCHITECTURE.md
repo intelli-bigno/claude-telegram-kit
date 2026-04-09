@@ -399,9 +399,10 @@ Telegram long-polling을 시도한다. Telegram Bot API는 토큰당 하나의
 
 `clbg`는 **start/stop 시점에 .env 파일의 토큰을 교체**하는 방식으로 격리한다.
 
-1. **`clbg link`** — 토큰을 `.env`에 쓰는 것과 동시에 `containers.json`의
-   `botToken` 필드에도 저장한다. 이 필드가 토큰의 단일 진실 공급원(source of
-   truth)이 된다.
+1. **`clbg link`** — 토큰을 `containers.json`의 `botToken` 필드에만
+   저장한다. `.env`는 `DISABLED` 상태를 유지하며, `start` 시
+   `activate_token`이 활성화한다. `containers.json`이 토큰의 단일 진실
+   공급원(source of truth)이다.
 
 2. **`clbg start` / `clbg resume`** — tmux 세션 생성 직전에
    `activate_token(label)`을 호출하여 `containers.json`에서 토큰을 읽어
@@ -420,7 +421,7 @@ Telegram long-polling을 시도한다. Telegram Bot API는 토큰당 하나의
 
 ```
 clbg new   → .env = DISABLED (초기 상태)
-clbg link  → .env = <실제 토큰>, containers.json에 botToken 저장
+clbg link  → containers.json에 botToken 저장 (.env는 DISABLED 유지)
 clbg start → activate_token() → .env = <실제 토큰> → tmux 세션 시작
 clbg stop  → tmux 세션 종료 → deactivate_token() → .env = DISABLED
 clbg restart → stop(deactivate) → resume(activate) → 토큰 교체 완료

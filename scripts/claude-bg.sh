@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -258,14 +259,14 @@ def scaffold_cwd(cwd: Path, label: str, persona: str = "default", claude_md: Opt
     if not claude_md_path.exists():
         if claude_md:
             # custom template path provided by --claude-md
-            custom_path = Path(claude_md)
+            custom_path = Path(claude_md).expanduser().resolve()
             if not custom_path.exists():
                 die(f"custom CLAUDE.md template not found: {custom_path}")
             template_content = custom_path.read_text()
         else:
             template_path = TEMPLATES_DIR / f"{persona}.md"
             if not template_path.exists():
-                die(f"persona template not found: {template_path}")
+                die(f"persona template not found: {template_path}\n  (TEMPLATES_DIR resolved to: {TEMPLATES_DIR})")
             template_content = template_path.read_text()
         claude_md_path.write_text(template_content.replace("{label}", label))
         info(f"created CLAUDE.md (persona: {persona if not claude_md else 'custom'})")
@@ -276,7 +277,7 @@ def scaffold_cwd(cwd: Path, label: str, persona: str = "default", claude_md: Opt
     memory_index = memory_dir / "MEMORY.md"
     if not memory_index.exists():
         memory_index.write_text("")
-        info(f"created memory/ directory")
+        info("created memory/ directory")
 
 
 # ----- tmux wrappers ---------------------------------------------------------
@@ -395,18 +396,12 @@ def cmd_link(args) -> None:
         die("token doesn't look like a valid Telegram bot token (expected '123456789:AA...')")
 
     c = get_container(label)
-    state_dir = Path(c["stateDir"])
-    env_path = state_dir / ".env"
 
-    env_path.write_text(f"TELEGRAM_BOT_TOKEN={token}\n")
-    os.chmod(env_path, 0o600)
-    info(f"wrote token to {env_path}")
-
-    # containers.json에 botToken 저장 (start/stop 시 .env 토큰 교체에 사용)
+    # containers.json의 botToken에만 저장 (.env는 DISABLED 유지, start 시 activate_token이 활성화)
     data = load_containers()
     data["containers"][label]["botToken"] = token
     save_containers(data)
-    info(f"saved token to containers.json")
+    info("saved token to containers.json")
 
     # try to derive bot username by hitting Telegram's getMe (best effort)
     bot_username = _try_fetch_bot_username(token)
@@ -467,9 +462,8 @@ def deactivate_token(label: str) -> None:
     os.chmod(env_path, 0o600)
 
 
-def _require_token(c: dict) -> None:
+def _require_token(c: dict, label: str) -> None:
     """토큰이 사용 가능한 상태인지 확인한다. .env의 DISABLED 값도 '토큰 없음'으로 처리."""
-    label = Path(c["cwd"]).name
     # containers.json의 botToken 필드 확인
     data = load_containers()
     container = data.get("containers", {}).get(label, {})
@@ -492,7 +486,7 @@ def cmd_start(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
 
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
@@ -517,7 +511,7 @@ def cmd_resume(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
 
     tmux_name = c["tmuxSession"]
     if tmux_has(tmux_name):
@@ -562,7 +556,7 @@ def cmd_restart(args) -> None:
         # stop 시 토큰 비활성화 (polling 경쟁 방지)
         deactivate_token(label)
         info(f"deactivated token for {label}")
-        import time; time.sleep(0.5)
+        time.sleep(0.5)
     cmd_resume(args)
 
 
@@ -595,7 +589,7 @@ def cmd_exec(args) -> None:
     label = args.label
     validate_label(label)
     c = get_container(label)
-    _require_token(c)
+    _require_token(c, label)
     prompt = args.prompt
 
     cmd = [
